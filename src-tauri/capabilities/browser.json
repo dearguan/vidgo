@@ -7,5 +7,10 @@
   "remote": {
     "urls": ["http://*/*", "https://*/*", "http://*:*/*", "https://*:*/*"]
   },
-  "permissions": ["allow-sniffer-report"]
+  "permissions": [
+    "allow-sniffer-report",
+    "allow-sniffer-list",
+    "allow-sniffer-enqueue",
+    "allow-browser-login-done"
+  ]
 }

@@ -26,6 +26,8 @@ interface AppContextValue {
   clearParseRequest: () => void
   openBuiltinBrowser: (url?: string) => Promise<void>
   checkBuiltinCookies: (url: string) => Promise<number>
+  /** 打开内置浏览器登录，完成后自动重试解析或重新下载 */
+  loginFor: (url: string, taskId?: string) => Promise<void>
   taskAction: (action: TaskAction, id: string, deleteFile?: boolean) => void
   updateInfo: UpdateInfo | null
   checkingUpdate: boolean
@@ -60,6 +62,7 @@ export function AppProvider({ children }: { children: ReactNode }): ReactElement
   const toastId = useRef(0)
   const parseToken = useRef(0)
   const statusRef = useRef<Record<string, DownloadTask['status']>>({})
+  const pendingLogin = useRef<{ url?: string; taskId?: string }>({})
 
   const notify = useCallback((text: string, type: 'ok' | 'err' = 'ok') => {
     const id = ++toastId.current
@@ -146,6 +149,39 @@ export function AppProvider({ children }: { children: ReactNode }): ReactElement
     return api.checkBuiltinCookies(url)
   }, [])
 
+  const loginFor = useCallback(async (url: string, taskId?: string) => {
+    pendingLogin.current = { url, taskId }
+    try {
+      await api.openBuiltinBrowser(url)
+      notify('已打开内置浏览器，登录后点右上角「完成登录」')
+    } catch (e) {
+      notify(e instanceof Error ? e.message : String(e), 'err')
+    }
+  }, [notify])
+
+  // 侧栏「添加」与「完成登录」都在主窗口处理
+  useEffect(() => {
+    const offEnqueue = api.onSnifferEnqueue?.((media) => {
+      requestParse(media.url)
+      notify(`已加入下载列表：${media.title || media.url}`)
+    })
+    const offLogin = api.onBrowserLoginDone?.(() => {
+      const pending = pendingLogin.current
+      pendingLogin.current = {}
+      if (pending.taskId) {
+        notify('已保存登录状态，正在重新下载…')
+        void api.redownloadTask(pending.taskId).catch((e) => notify(e instanceof Error ? e.message : String(e), 'err'))
+      } else if (pending.url) {
+        notify('已保存登录状态，正在重新解析…')
+        requestParse(pending.url)
+      }
+    })
+    return () => {
+      offEnqueue?.()
+      offLogin?.()
+    }
+  }, [requestParse, notify])
+
   const taskAction = useCallback((action: TaskAction, id: string, deleteFile = false) => {
     const map: Record<TaskAction, (id: string) => Promise<unknown>> = {
       pause: api.pauseTask,
@@ -156,8 +192,8 @@ export function AppProvider({ children }: { children: ReactNode }): ReactElement
       openFile: api.openFile,
       redownload: api.redownloadTask
     }
-    void map[action](id)
-  }, [])
+    void map[action](id).catch((e) => notify(e instanceof Error ? e.message : String(e), 'err'))
+  }, [notify])
 
   const checkUpdate = useCallback(
     async (silent = false) => {
@@ -218,6 +254,7 @@ export function AppProvider({ children }: { children: ReactNode }): ReactElement
         clearParseRequest,
         openBuiltinBrowser,
         checkBuiltinCookies,
+        loginFor,
         taskAction,
         updateInfo,
         checkingUpdate,

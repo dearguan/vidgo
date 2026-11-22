@@ -238,7 +238,9 @@ fn launch_installer(setup: &Path) -> Result<(), String> {
         setup.display(),
         app_exe.display()
     );
-    std::process::Command::new("cmd")
+    let mut command = std::process::Command::new("cmd");
+    crate::ytdlp::hide_console(&mut command);
+    command
         .args(["/C", &script])
         .spawn()
         .map(|_| ())

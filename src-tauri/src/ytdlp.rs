@@ -48,6 +48,30 @@ pub fn ffmpeg_path() -> PathBuf {
     binary_dir().join(name)
 }
 
+/// Windows 下 GUI 程序调起控制台子进程（yt-dlp / cmd）会额外弹出一个黑色窗口，
+/// 统一加上 CREATE_NO_WINDOW 隐藏它；其他平台为空操作。
+pub fn hide_console(cmd: &mut std::process::Command) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = cmd;
+}
+
+/// 同 [`hide_console`]，用于 tokio 异步进程。
+pub fn hide_console_async(cmd: &mut tokio::process::Command) {
+    #[cfg(target_os = "windows")]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = cmd;
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FormatOption {
@@ -79,7 +103,7 @@ pub struct MediaInfo {
     pub formats: Vec<FormatOption>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ParseResult {
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -88,6 +112,9 @@ pub struct ParseResult {
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// 失败原因是否是「需要登录 / Cookie」，前端据此显示「去登录」
+    #[serde(default)]
+    pub needs_login: bool,
 }
 
 pub const HONGGUO_USER_AGENT: &str =
@@ -229,12 +256,71 @@ fn parse_hongguo_html(html: &str, source_url: &str) -> Result<HongguoMedia, Stri
     })
 }
 
+/// 内置浏览器导出的 Cookie 文件路径（与配置文件同目录）
+pub fn builtin_cookies_path() -> PathBuf {
+    let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
+    base.join("Vidgo").join("builtin-cookies.txt")
+}
+
+/// 传给 yt-dlp 的 Cookie 参数。临时副本用于避免多任务并发时 yt-dlp 回写同一文件；
+/// 离开作用域自动删除。
+pub struct CookieArgs {
+    pub args: Vec<String>,
+    temp: Option<PathBuf>,
+}
+
+impl Drop for CookieArgs {
+    fn drop(&mut self) {
+        if let Some(path) = self.temp.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn builtin_cookies_fresh(path: &std::path::Path) -> bool {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age < std::time::Duration::from_secs(7 * 24 * 3600))
+}
+
+/// 优先使用内置浏览器导出的 Cookie，其次回退系统浏览器。
+pub fn cookie_args(settings: &crate::store::Settings) -> CookieArgs {
+    let path = builtin_cookies_path();
+    if builtin_cookies_fresh(&path) {
+        if let Ok(bytes) = std::fs::read(&path) {
+            let temp = std::env::temp_dir()
+                .join(format!("vidgo-cookies-{}.txt", uuid::Uuid::new_v4()));
+            if std::fs::write(&temp, bytes).is_ok() {
+                return CookieArgs {
+                    args: vec!["--cookies".into(), temp.to_string_lossy().to_string()],
+                    temp: Some(temp),
+                };
+            }
+        }
+    }
+    if !settings.cookies_from_browser.is_empty() {
+        return CookieArgs {
+            args: vec![
+                "--cookies-from-browser".into(),
+                settings.cookies_from_browser.clone(),
+            ],
+            temp: None,
+        };
+    }
+    CookieArgs {
+        args: Vec::new(),
+        temp: None,
+    }
+}
+
 pub fn build_download_args(
     url: &str,
     selector: &str,
     save_dir: &str,
     proxy: &str,
-    cookies_from_browser: &str,
+    cookie_args: &[String],
     audio_format: Option<&str>,
     height: Option<u16>,
 ) -> Vec<String> {
@@ -252,6 +338,8 @@ pub fn build_download_args(
         "download:VGP|%(status)s|%(downloaded_bytes)s|%(total_bytes)s|%(total_bytes_estimate)s|%(speed)s|%(eta)s|%(progress._percent_str)s".into(),
         "--print".into(),
         "before_dl:VGFILE|%(filepath)s".into(),
+        "--print".into(),
+        "after_move:VGFEND|%(filepath)s".into(),
     ];
     // 明确告诉 yt-dlp 用随包附带的 ffmpeg（合并 DASH 音视频 / 转 MP3 必需）
     let ff = ffmpeg_path();
@@ -278,10 +366,7 @@ pub fn build_download_args(
         args.push("--proxy".into());
         args.push(proxy.into());
     }
-    if !cookies_from_browser.is_empty() {
-        args.push("--cookies-from-browser".into());
-        args.push(cookies_from_browser.into());
-    }
+    args.extend(cookie_args.iter().cloned());
     args.push(url.into());
     args
 }

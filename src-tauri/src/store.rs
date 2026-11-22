@@ -98,6 +98,9 @@ pub struct DownloadTask {
     pub eta: Option<f64>,
     pub error: Option<String>,
     pub error_detail: Option<String>,
+    /// 失败原因是否需要登录（前端显示「去登录」）
+    #[serde(default)]
+    pub needs_login: bool,
     #[serde(default)]
     pub file_path: Option<String>,
     #[serde(default)]

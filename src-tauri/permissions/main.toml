@@ -12,6 +12,8 @@ commands.allow = [
   "redownload_task",
   "get_tasks",
   "open_save_dir",
+  "open_task_file",
+  "reveal_task_file",
   "choose_dir",
   "get_settings",
   "set_settings",

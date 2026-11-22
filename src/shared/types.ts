@@ -30,7 +30,9 @@ export interface MediaInfo {
   formats: FormatOption[]
 }
 
-export type ParseResult = { ok: true; info: MediaInfo } | { ok: false; message: string; detail?: string }
+export type ParseResult =
+  | { ok: true; info: MediaInfo; needsLogin?: boolean }
+  | { ok: false; message: string; detail?: string; needsLogin?: boolean }
 
 export interface DownloadTask {
   id: string
@@ -53,6 +55,7 @@ export interface DownloadTask {
   eta: number | null
   error?: string
   errorDetail?: string
+  needsLogin?: boolean
   filePath?: string
   createdAt: number
   completedAt?: number
@@ -205,4 +208,6 @@ export interface Api {
   onUpdateProgress?(cb: (progress: UpdateProgress) => void): () => void
   onTasksChanged(cb: (tasks: DownloadTask[]) => void): () => void
   onSnifferFound(cb: (media: SniffedMedia) => void): () => void
+  onSnifferEnqueue?(cb: (media: SniffedMedia) => void): () => void
+  onBrowserLoginDone?(cb: () => void): () => void
 }

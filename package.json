@@ -1,6 +1,6 @@
 {
   "name": "vidgo",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "description": "VideoGo - Windows 视频下载器",
   "main": "./out/main/index.js",
   "author": "VideoGo",

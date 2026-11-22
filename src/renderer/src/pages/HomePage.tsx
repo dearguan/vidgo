@@ -15,7 +15,7 @@ function middleEllipsis(text: string, max = 46): string {
 }
 
 export function HomePage(): ReactElement {
-  const { settings, chooseDir, notify, setView, parseRequest, clearParseRequest } = useApp()
+  const { settings, chooseDir, notify, setView, parseRequest, clearParseRequest, loginFor } = useApp()
   const [url, setUrl] = useState('')
   const [media, setMedia] = useState<MediaInfo | null>(null)
   const [formatId, setFormatId] = useState('')
@@ -23,7 +23,7 @@ export function HomePage(): ReactElement {
   const [audioOnly, setAudioOnly] = useState(false)
   const [parsing, setParsing] = useState(false)
   const [slowParse, setSlowParse] = useState(false)
-  const [parseError, setParseError] = useState<{ message: string; detail?: string } | null>(null)
+  const [parseError, setParseError] = useState<{ message: string; detail?: string; needsLogin?: boolean } | null>(null)
   const [showDetail, setShowDetail] = useState(false)
   const [clipHint, setClipHint] = useState('')
   const [urlInvalid, setUrlInvalid] = useState(false)
@@ -80,7 +80,7 @@ export function HomePage(): ReactElement {
         setAudioId(result.info.formats.find((f) => f.kind === 'audio')?.id ?? '')
         setAudioOnly(false)
       } else if (result.message !== '已取消解析') {
-        setParseError({ message: result.message, detail: result.detail })
+        setParseError({ message: result.message, detail: result.detail, needsLogin: result.needsLogin })
       }
     } catch (e) {
       if (id === seq.current) {
@@ -338,9 +338,19 @@ export function HomePage(): ReactElement {
               <p>{parseError.message}</p>
             </div>
           </div>
-          <p className="error-suggestion">建议：检查网址是否完整、网络是否可访问该网站，然后重试。若持续失败，可能是网站更新导致解析器暂时失效。</p>
+          <p className="error-suggestion">
+            {parseError.needsLogin
+              ? '这个网站需要登录才能获取视频。点「去登录」打开内置浏览器，登录完成后点右上角「完成登录」，会自动重新解析。'
+              : '建议：检查网址是否完整、网络是否可访问该网站，然后重试。若持续失败，可能是网站更新导致解析器暂时失效。'}
+          </p>
           <div className="error-actions">
-            <button className="btn primary" onClick={() => void startParse()}>
+            {parseError.needsLogin && (
+              <button className="btn primary" onClick={() => void loginFor(url)}>
+                <Icon name="globe" size={16} />
+                去登录
+              </button>
+            )}
+            <button className={parseError.needsLogin ? 'btn secondary' : 'btn primary'} onClick={() => void startParse()}>
               重试
             </button>
             <button

@@ -1,5 +1,6 @@
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
@@ -12,6 +13,7 @@ const MAX_TITLE_CHARS: usize = 512;
 const DEDUP_WINDOW: Duration = Duration::from_secs(10);
 const RATE_WINDOW: Duration = Duration::from_secs(10);
 const MAX_REPORTS_PER_RATE_WINDOW: usize = 60;
+const MAX_MEDIA_ITEMS: usize = 200;
 
 const SNIFFER_SCRIPT: &str = r##"
 (() => {
@@ -161,12 +163,185 @@ const SNIFFER_SCRIPT: &str = r##"
     };
   }
 })();
+
+// ---------- Vidgo 媒体侧栏（仅顶层页面） ----------
+(() => {
+  if (window.top !== window) return;
+  const tauri = window.__TAURI__;
+  if (!tauri || !tauri.core || typeof tauri.core.invoke !== 'function') return;
+  const invoke = (cmd, args) => tauri.core.invoke(cmd, args);
+
+  const HOST_ID = '__vidgo_sidebar_v1__';
+  const CSS = [
+    '.vg-panel{position:fixed;top:0;right:0;width:320px;height:100vh;box-sizing:border-box;',
+    'background:#141720;color:#e8eaf0;font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;',
+    'display:flex;flex-direction:column;box-shadow:-6px 0 20px rgba(0,0,0,.35);border-left:1px solid #262a36}',
+    '.vg-head{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid #262a36}',
+    '.vg-title{flex:1;font-weight:600}',
+    '.vg-btn{cursor:pointer;border:0;border-radius:6px;font:inherit;padding:5px 10px}',
+    '.vg-login{background:#3b82f6;color:#fff}',
+    '.vg-toggle{background:#262a36;color:#cfd4e0}',
+    '.vg-status{padding:6px 12px;color:#7fd1a0;min-height:16px;font-size:12px}',
+    '.vg-list{flex:1;overflow:auto}',
+    '.vg-item{padding:9px 12px;border-bottom:1px solid #1e2230}',
+    '.vg-badge{display:inline-block;background:#1e2a45;color:#8fb7ff;border-radius:4px;padding:0 5px;font-size:11px;margin-right:6px}',
+    '.vg-name{font-weight:600;word-break:break-all}',
+    '.vg-url{color:#7d8496;font-size:11px;word-break:break-all;margin:3px 0 6px}',
+    '.vg-add{background:#22c55e;color:#06240f;padding:4px 10px}',
+    '.vg-empty{color:#7d8496;padding:24px 12px;text-align:center}',
+    '.vg-capsule{position:fixed;top:12px;right:12px;background:#3b82f6;color:#fff;border:0;border-radius:999px;',
+    'padding:7px 12px;font:13px/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;cursor:pointer;',
+    'box-shadow:0 2px 10px rgba(0,0,0,.4)}'
+  ].join('');
+
+  let host = null;
+  let panelEl = null;
+  let listEl = null;
+  let countEl = null;
+  let statusEl = null;
+  let capsuleEl = null;
+  let collapsed = false;
+  let latest = [];
+  const added = Object.create(null);
+
+  function make(tag, cls, text) {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text != null) node.textContent = String(text);
+    return node;
+  }
+
+  function setCollapsed(next) {
+    collapsed = next;
+    if (panelEl) panelEl.style.display = next ? 'none' : 'flex';
+    if (capsuleEl) capsuleEl.style.display = next ? 'block' : 'none';
+  }
+
+  function render() {
+    if (!listEl) return;
+    const label = '媒体 (' + latest.length + ')';
+    countEl.textContent = label;
+    capsuleEl.textContent = label;
+    listEl.textContent = '';
+    if (!latest.length) {
+      listEl.appendChild(make('div', 'vg-empty', '播放页面里的视频，这里会出现可下载地址'));
+      return;
+    }
+    for (const item of latest) {
+      const wrap = make('div', 'vg-item');
+      const top = make('div');
+      top.appendChild(make('span', 'vg-badge', String(item.mediaType || 'media').toUpperCase()));
+      top.appendChild(make('span', 'vg-name', item.title || '未命名媒体'));
+      const urlLine = make('div', 'vg-url', item.url);
+      const add = make('button', 'vg-btn vg-add', added[item.url] ? '已添加' : '添加');
+      if (added[item.url]) add.disabled = true;
+      add.addEventListener('click', () => {
+        add.disabled = true;
+        add.textContent = '添加中…';
+        Promise.resolve(invoke('sniffer_enqueue', { url: item.url })).then(() => {
+          added[item.url] = true;
+          add.textContent = '已添加';
+          if (statusEl) statusEl.textContent = '已加入主窗口下载列表';
+        }).catch((error) => {
+          add.disabled = false;
+          add.textContent = '添加';
+          if (statusEl) statusEl.textContent = '添加失败：' + (error && error.message ? error.message : error);
+        });
+      });
+      wrap.appendChild(top);
+      wrap.appendChild(urlLine);
+      wrap.appendChild(add);
+      listEl.appendChild(wrap);
+    }
+  }
+
+  function build() {
+    if (!document.documentElement) return;
+    host = document.createElement('div');
+    host.id = HOST_ID;
+    host.style.position = 'fixed';
+    host.style.top = '0';
+    host.style.left = '0';
+    host.style.width = '0';
+    host.style.height = '0';
+    host.style.zIndex = '2147483647';
+
+    const root = host.attachShadow({ mode: 'open' });
+    const style = document.createElement('style');
+    style.textContent = CSS;
+    root.appendChild(style);
+
+    const panel = make('div', 'vg-panel');
+    const head = make('div', 'vg-head');
+    const title = make('span', 'vg-title', '媒体 (0)');
+    const login = make('button', 'vg-btn vg-login', '完成登录');
+    const toggle = make('button', 'vg-btn vg-toggle', '收起');
+    head.appendChild(title);
+    head.appendChild(login);
+    head.appendChild(toggle);
+
+    const status = make('div', 'vg-status', '');
+    const list = make('div', 'vg-list');
+    panel.appendChild(head);
+    panel.appendChild(status);
+    panel.appendChild(list);
+
+    const capsule = make('button', 'vg-capsule', '媒体 (0)');
+    capsule.style.display = 'none';
+
+    root.appendChild(panel);
+    root.appendChild(capsule);
+    document.documentElement.appendChild(host);
+
+    panelEl = panel;
+    listEl = list;
+    countEl = title;
+    statusEl = status;
+    capsuleEl = capsule;
+
+    login.addEventListener('click', () => {
+      status.textContent = '正在保存登录状态…';
+      Promise.resolve(invoke('browser_login_done')).then(() => {
+        status.textContent = '已保存登录状态，正在重试…';
+      }).catch((error) => {
+        status.textContent = '保存失败：' + (error && error.message ? error.message : error);
+      });
+    });
+    toggle.addEventListener('click', () => setCollapsed(!collapsed));
+    capsule.addEventListener('click', () => setCollapsed(false));
+
+    setCollapsed(collapsed);
+    render();
+  }
+
+  function refresh() {
+    Promise.resolve(invoke('sniffer_list')).then((items) => {
+      latest = Array.isArray(items) ? items : [];
+      render();
+    }).catch(() => {});
+  }
+
+  function tick() {
+    if (!document.documentElement) return;
+    if (!host || !host.isConnected) build();
+    refresh();
+  }
+
+  if (document.documentElement) {
+    tick();
+  } else {
+    document.addEventListener('DOMContentLoaded', tick, { once: true });
+  }
+  setInterval(tick, 2000);
+})();
 "##;
 
 #[derive(Debug, Default)]
 pub struct SnifferState {
     recent_urls: HashMap<String, Instant>,
     report_times: VecDeque<Instant>,
+    /// 已捕获的媒体列表（新的在前），供侧栏展示与「添加」
+    media: Vec<SnifferPayload>,
 }
 
 impl SnifferState {
@@ -280,26 +455,133 @@ pub fn report(
     let title: String = title.trim().chars().take(MAX_TITLE_CHARS).collect();
     let now = Instant::now();
 
-    state
-        .lock()
-        .map_err(|error| error.to_string())?
-        .accept(media_url.as_str(), now)?;
-
     let payload = SnifferPayload {
         id: Uuid::new_v4().to_string(),
-        url: media_url.into(),
+        url: media_url.to_string(),
         media_type,
         title,
-        page_url: page_url.into(),
+        page_url: page_url.to_string(),
         timestamp: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_millis() as u64)
             .unwrap_or_default(),
     };
+    {
+        let mut guard = state.lock().map_err(|error| error.to_string())?;
+        guard.accept(payload.url.as_str(), now)?;
+        guard.media.retain(|item| item.url != payload.url);
+        guard.media.insert(0, payload.clone());
+        guard.media.truncate(MAX_MEDIA_ITEMS);
+    }
     window
         .app_handle()
         .emit("sniffer:found", payload)
         .map_err(|error| error.to_string())
+}
+
+/// 侧栏拉取已捕获的媒体列表
+pub fn list(state: &Mutex<SnifferState>) -> Result<Vec<SnifferPayload>, String> {
+    let guard = state.lock().map_err(|error| error.to_string())?;
+    Ok(guard.media.clone())
+}
+
+/// 侧栏点「添加」：只接受已捕获列表中的地址，防止第三方页面伪造下载
+pub fn enqueue(app: &AppHandle, state: &Mutex<SnifferState>, url: &str) -> Result<(), String> {
+    let media_url = parse_http_url(url)?;
+    let payload = {
+        let guard = state.lock().map_err(|error| error.to_string())?;
+        guard
+            .media
+            .iter()
+            .find(|item| item.url == media_url.as_str())
+            .cloned()
+    }
+    .ok_or_else(|| "该地址不在已捕获列表中，请先在页面里播放视频。".to_string())?;
+    app.emit("sniffer:enqueue", payload)
+        .map_err(|error| error.to_string())
+}
+
+/// 拼一行 Netscape Cookie 记录（HttpOnly 用 `#HttpOnly_` 前缀，yt-dlp 可识别）
+#[allow(clippy::too_many_arguments)]
+fn netscape_cookie_line(
+    domain: &str,
+    http_only: bool,
+    include_sub: &str,
+    path: &str,
+    secure: &str,
+    expires: i64,
+    name: &str,
+    value: &str,
+) -> String {
+    let prefix = if http_only {
+        format!("#HttpOnly_{domain}")
+    } else {
+        domain.to_string()
+    };
+    format!("{prefix}\t{include_sub}\t{path}\t{secure}\t{expires}\t{name}\t{value}\n")
+}
+
+/// 把内置浏览器当前站点的 Cookie 导出为 Netscape 格式，供 yt-dlp 使用。
+/// 域名取自 webview 当前页面，不接受调用方传入的 URL。
+pub async fn export_cookies(app: &AppHandle) -> Result<PathBuf, String> {
+    let window = browser_window(app)?;
+    let current = window.url().map_err(|error| error.to_string())?;
+    let host = current
+        .host_str()
+        .ok_or_else(|| "当前页面没有有效域名".to_string())?
+        .to_ascii_lowercase();
+    // 注意：这里用全量 cookies 自行匹配父域，cookies_for_url 在 macOS 只做精确匹配
+    let cookies = window.cookies().map_err(|error| error.to_string())?;
+
+    let mut text = String::from("# Netscape HTTP Cookie File\n# Generated by Vidgo\n\n");
+    let mut count = 0usize;
+    for cookie in cookies {
+        let Some(domain) = cookie.domain() else { continue };
+        let bare = domain.trim_start_matches('.').to_ascii_lowercase();
+        if bare.is_empty() || (host != bare && !host.ends_with(&format!(".{bare}"))) {
+            continue;
+        }
+        let name = cookie.name();
+        let value = cookie.value();
+        let invalid = |s: &str| s.chars().any(|c| c == '\t' || c == '\n' || c == '\r');
+        if name.is_empty() || invalid(name) || invalid(value) {
+            continue;
+        }
+        let include_sub = if domain.starts_with('.') { "TRUE" } else { "FALSE" };
+        let path = cookie.path().unwrap_or("/");
+        let secure = if cookie.secure().unwrap_or(false) { "TRUE" } else { "FALSE" };
+        let expires = cookie
+            .expires_datetime()
+            .map(|time| time.unix_timestamp())
+            .unwrap_or(0)
+            .max(0);
+        text.push_str(&netscape_cookie_line(
+            domain,
+            cookie.http_only().unwrap_or(false),
+            include_sub,
+            path,
+            secure,
+            expires,
+            name,
+            value,
+        ));
+        count += 1;
+    }
+    if count == 0 {
+        return Err("当前站点没有可导出的 Cookie，请先完成登录。".into());
+    }
+
+    let path = crate::ytdlp::builtin_cookies_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| format!("创建目录失败：{error}"))?;
+    }
+    std::fs::write(&path, text).map_err(|error| format!("保存 Cookie 失败：{error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(path)
 }
 
 fn browser_window(app: &AppHandle) -> Result<WebviewWindow, String> {
@@ -342,6 +624,26 @@ fn classify_media_type(url: &Url) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn netscape_cookie_line_marks_httponly_and_flags() {
+        let line = netscape_cookie_line(
+            ".bilibili.com",
+            true,
+            "TRUE",
+            "/",
+            "TRUE",
+            1_700_000_000,
+            "SESSDATA",
+            "abc123",
+        );
+        assert_eq!(
+            line,
+            "#HttpOnly_.bilibili.com\tTRUE\t/\tTRUE\t1700000000\tSESSDATA\tabc123\n"
+        );
+        let plain = netscape_cookie_line("example.com", false, "FALSE", "/", "FALSE", 0, "a", "b");
+        assert_eq!(plain, "example.com\tFALSE\t/\tFALSE\t0\ta\tb\n");
+    }
 
     #[test]
     fn classifies_supported_media_by_pathname_and_keeps_query() {

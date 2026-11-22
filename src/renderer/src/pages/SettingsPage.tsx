@@ -143,7 +143,7 @@ export function SettingsPage(): ReactElement {
       <Group title="登录与 Cookie" onReset={() => patch({ cookieBrowser: 'auto' })}>
         <Row
           label="内置浏览器"
-          hint="在内置浏览器中登录视频站后，网页捕获会保留登录状态。内置浏览器 Cookie 不保证自动传给 yt-dlp；如下载需要登录，请同时配置下方系统浏览器 Cookie。"
+          hint="在内置浏览器里登录后，点页面右上角「完成登录」，该站 Cookie 会保存并自动用于解析与下载（有效期 7 天）。也可以直接读取系统浏览器 Cookie。"
         >
           <button
             className="btn primary"

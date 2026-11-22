@@ -2,3 +2,18 @@
 identifier = "allow-sniffer-report"
 description = "Allows only the built-in browser to report detected media URLs."
 commands.allow = ["sniffer_report"]
+
+[[permission]]
+identifier = "allow-sniffer-list"
+description = "Allows the built-in browser sidebar to read captured media list."
+commands.allow = ["sniffer_list"]
+
+[[permission]]
+identifier = "allow-sniffer-enqueue"
+description = "Allows the built-in browser sidebar to enqueue a captured media URL."
+commands.allow = ["sniffer_enqueue"]
+
+[[permission]]
+identifier = "allow-browser-login-done"
+description = "Allows the built-in browser sidebar to export cookies after login."
+commands.allow = ["browser_login_done"]

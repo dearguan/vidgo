@@ -1,4 +1,4 @@
-use crate::browser::SnifferState;
+use crate::browser::{SnifferPayload, SnifferState};
 use crate::store::{AppStore, DownloadTask, Settings, TaskStatus};
 use crate::ytdlp::{self, FormatOption, MediaInfo, ParseResult, ytdlp_path};
 use serde::{Deserialize, Serialize};
@@ -6,7 +6,9 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use std::process::Stdio;
 use uuid::Uuid;
@@ -23,6 +25,104 @@ fn current_save_dir(state: &State<'_, Mutex<AppStore>>) -> Result<PathBuf, Strin
     Ok(PathBuf::from(&s.data.settings.save_dir))
 }
 
+/// 修改任务并持久化 + 通知前端。避免在多处重复加锁样板。
+fn with_task<F>(state: &State<'_, Mutex<AppStore>>, app: &AppHandle, id: &str, f: F)
+where
+    F: FnOnce(&mut DownloadTask),
+{
+    let mut s = match state.inner().lock() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    if let Some(t) = s.data.tasks.iter_mut().find(|t| t.id == id) {
+        f(t);
+    }
+    s.save();
+    let _ = app.emit("tasks:changed", s.data.tasks.clone());
+}
+
+const MEDIA_EXTS: [&str; 8] = ["mp4", "m4a", "mp3", "webm", "mkv", "mov", "flv", "aac"];
+
+/// 校验文件头，识别「HTML/JSON 错误页被存成 .mp4」这类假成功。
+fn looks_like_media(path: &Path) -> bool {
+    use std::io::Read;
+    let mut file = match fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut head = [0u8; 16];
+    let n = match file.read(&mut head) {
+        Ok(n) => n,
+        Err(_) => return false,
+    };
+    if n < 4 {
+        return false;
+    }
+    let h = &head[..n];
+    // mp4 / m4a / mov：4 字节 box 长度 + "ftyp"
+    if n >= 8 && &h[4..8] == b"ftyp" {
+        return true;
+    }
+    // webm / mkv
+    if h.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+        return true;
+    }
+    // mp3：ID3 标签或 MPEG 帧同步
+    if h.starts_with(b"ID3") || (h[0] == 0xFF && (h[1] & 0xE0) == 0xE0) {
+        return true;
+    }
+    // flv
+    h.starts_with(b"FLV")
+}
+
+/// 找到下载目录里本次任务开始后写入的最新媒体文件（兜底 yt-dlp 没打印路径的情况）。
+fn newest_media_since(dir: &Path, since: SystemTime) -> Option<PathBuf> {
+    let mut best: Option<(SystemTime, PathBuf)> = None;
+    let entries = fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !MEDIA_EXTS.contains(&ext.as_str()) {
+            continue;
+        }
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.len() == 0 {
+            continue;
+        }
+        let modified = match meta.modified() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        // 允许 2 秒时钟误差
+        if modified + Duration::from_secs(2) < since {
+            continue;
+        }
+        if best.as_ref().map(|(t, _)| modified > *t).unwrap_or(true) {
+            best = Some((modified, path));
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+fn tail_chars(text: &str, max: usize) -> String {
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_string();
+    }
+    text.chars().skip(count - max).collect()
+}
+
+
 fn open_with_system(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     let mut command = std::process::Command::new("explorer");
@@ -38,7 +138,9 @@ fn open_with_system(path: &Path) -> Result<(), String> {
 }
 
 fn get_ytdlp_ver() -> String {
-    std::process::Command::new(ytdlp_path())
+    let mut command = std::process::Command::new(ytdlp_path());
+    ytdlp::hide_console(&mut command);
+    command
         .arg("--version")
         .output()
         .ok()
@@ -108,7 +210,21 @@ pub async fn get_app_info(app: AppHandle) -> Result<AppInfo, String> {
 #[tauri::command]
 pub async fn get_tasks(state: State<'_, Mutex<AppStore>>) -> Result<Vec<DownloadTask>, String> {
     let s = state.inner().lock().map_err(|e| e.to_string())?;
-    Ok(s.data.tasks.clone())
+    let mut tasks = s.data.tasks.clone();
+    // 旧记录可能没有记录大小，用磁盘文件真实大小补齐展示
+    for task in tasks.iter_mut() {
+        if matches!(task.status, TaskStatus::Completed) && task.total == 0 {
+            if let Some(path) = task.file_path.as_deref() {
+                if let Ok(meta) = fs::metadata(path) {
+                    if meta.is_file() && meta.len() > 0 {
+                        task.total = meta.len();
+                        task.downloaded = meta.len();
+                    }
+                }
+            }
+        }
+    }
+    Ok(tasks)
 }
 
 #[tauri::command]
@@ -151,12 +267,14 @@ pub async fn parse_media(state: State<'_, Mutex<AppStore>>, url: String) -> Resu
                 info: Some(media.info),
                 message: None,
                 detail: None,
+                needs_login: false,
             },
             Err(e) => ParseResult {
                 ok: false,
                 info: None,
                 message: Some("红果视频解析失败，请确认链接有效或稍后重试。".into()),
                 detail: Some(e),
+                needs_login: false,
             },
         });
     }
@@ -169,13 +287,14 @@ pub async fn parse_media(state: State<'_, Mutex<AppStore>>, url: String) -> Resu
         args.push("--proxy".into());
         args.push(settings.proxy.clone());
     }
-    if !settings.cookies_from_browser.is_empty() {
-        args.push("--cookies-from-browser".into());
-        args.push(settings.cookies_from_browser.clone());
-    }
+    // 内置浏览器导出的 Cookie 优先，其次系统浏览器；临时文件在此作用域结束时删除
+    let cookies = ytdlp::cookie_args(&settings);
+    args.extend(cookies.args.iter().cloned());
     args.push(url.clone());
 
-    let output = match std::process::Command::new(ytdlp_path()).args(&args).output() {
+    let mut command = std::process::Command::new(ytdlp_path());
+    ytdlp::hide_console(&mut command);
+    let output = match command.args(&args).output() {
         Ok(o) => o,
         Err(e) => {
             return Ok(ParseResult {
@@ -183,6 +302,7 @@ pub async fn parse_media(state: State<'_, Mutex<AppStore>>, url: String) -> Resu
                 info: None,
                 message: Some(format!("无法启动解析引擎：{}", e)),
                 detail: Some(e.to_string()),
+                needs_login: false,
             });
         }
     };
@@ -193,19 +313,41 @@ pub async fn parse_media(state: State<'_, Mutex<AppStore>>, url: String) -> Resu
             ok: false,
             info: None,
             message: Some(humanize_err(&stderr)),
+            needs_login: needs_login_error(&stderr),
             detail: Some(stderr),
         });
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     Ok(match parse_json(&stdout, &url) {
-        Ok(info) => ParseResult { ok: true, info: Some(info), message: None, detail: None },
+        Ok(info) => ParseResult {
+            ok: true,
+            info: Some(info),
+            message: None,
+            detail: None,
+            needs_login: false,
+        },
         Err(e) => ParseResult {
             ok: false, info: None,
             message: Some("解析结果异常，请稍后重试。".into()),
             detail: Some(e.to_string()),
+            needs_login: false,
         },
     })
+}
+
+/// 判断失败原因是否属于「需要登录 / Cookie」，用于引导用户去内置浏览器登录
+fn needs_login_error(detail: &str) -> bool {
+    const KEYS: [&str; 6] = [
+        "Fresh cookies",
+        "Sign in to confirm",
+        "login required",
+        "Private video",
+        "HTTP Error 403",
+        "Forbidden",
+    ];
+    let lower = detail.to_lowercase();
+    KEYS.iter().any(|key| lower.contains(&key.to_lowercase()))
 }
 
 fn humanize_err(detail: &str) -> String {
@@ -215,7 +357,7 @@ fn humanize_err(detail: &str) -> String {
         ("HTTP Error 403|Forbidden", "网站拒绝访问（403）。可能是地区限制或需要登录。"),
         ("HTTP Error 404|not found", "视频不存在或已被删除（404）。"),
         ("getaddrinfo|timed out|Connection refused|SSL", "网络连接失败，请检查网络或代理设置。"),
-        ("Fresh cookies", "该视频需要新鲜 Cookie 才能解析，请到设置里配置或用内置浏览器登录一次。"),
+        ("Fresh cookies", "该网站需要登录 Cookie。请在「设置 → 读取系统浏览器 Cookie」选择你登录过该站的浏览器（如 Chrome / Edge），再重新解析。"),
         ("ffmpeg|ffprobe", "FFmpeg 处理失败，请检查组件是否完整。"),
         ("No space left|ENOSPC|disk quota", "磁盘空间不足，请更换保存位置。"),
         ("Permission denied|EACCES|EPERM", "没有写入权限，请更换保存位置。"),
@@ -307,6 +449,7 @@ pub async fn start_download(
         save_dir: payload.save_dir.clone(),
         status: TaskStatus::Waiting, progress: 0.0, downloaded: 0, total: 0,
         speed: 0.0, eta: None, error: None, error_detail: None,
+        needs_login: false,
         file_path: None, completed_at: None, created_at: now_ms(),
     };
 
@@ -357,9 +500,10 @@ pub async fn start_download(
                 }
             }
         }
+        let cookies = ytdlp::cookie_args(&settings);
         let mut args = ytdlp::build_download_args(
             &download_url, &task_clone.selector, &task_clone.save_dir,
-            &settings.proxy, &settings.cookies_from_browser,
+            &settings.proxy, &cookies.args,
             task_clone.audio_format.as_deref(), task_clone.height,
         );
         if is_hongguo {
@@ -372,7 +516,9 @@ pub async fn start_download(
             with_headers.extend(args);
             args = with_headers;
         }
-        let child = match Command::new(ytdlp_path()).args(&args).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+        let mut cmd = Command::new(ytdlp_path());
+        ytdlp::hide_console_async(&mut cmd);
+        let mut child = match cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
             Ok(c) => c,
             Err(e) => {
                 let mut s = state.inner().lock().unwrap();
@@ -385,46 +531,205 @@ pub async fn start_download(
                 return;
             }
         };
-        {
-            let mut s = state.inner().lock().unwrap();
-            if let Some(t) = s.data.tasks.iter_mut().find(|t| t.id == id2) {
-                t.status = TaskStatus::Downloading;
+        with_task(&state, &app2, &id2, |t| {
+            t.status = TaskStatus::Downloading;
+        });
+
+        let started = SystemTime::now();
+        let mut reported: Option<PathBuf> = None;
+        let mut final_reported: Option<PathBuf> = None;
+        let mut stderr_buf = String::new();
+        let mut base_bytes: u64 = 0;
+        let mut prev_status = String::new();
+        let mut last_emit = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
+
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let mut out_lines = BufReader::new(stdout.unwrap()).lines();
+        let mut err_lines = BufReader::new(stderr.unwrap()).lines();
+        let mut out_done = false;
+        let mut err_done = false;
+        while !(out_done && err_done) {
+            tokio::select! {
+                line = out_lines.next_line(), if !out_done => {
+                    match line {
+                        Ok(Some(line)) => {
+                            if let Some(rest) = line.strip_prefix("VGFILE|") {
+                                reported = Some(PathBuf::from(rest.trim()));
+                            } else if let Some(rest) = line.strip_prefix("VGFEND|") {
+                                final_reported = Some(PathBuf::from(rest.trim()));
+                            } else if let Some(rest) = line.strip_prefix("VGP|") {
+                                let parts: Vec<&str> = rest.split('|').collect();
+                                let stream_status = parts.first().copied().unwrap_or("");
+                                let num = |i: usize| -> u64 {
+                                    parts
+                                        .get(i)
+                                        .and_then(|v| v.trim().parse::<f64>().ok())
+                                        .filter(|n| *n > 0.0)
+                                        .unwrap_or(0.0) as u64
+                                };
+                                let down = num(1);
+                                let total = match num(2) {
+                                    0 => num(3),
+                                    t => t,
+                                };
+                                let speed = parts
+                                    .get(4)
+                                    .and_then(|v| v.trim().parse::<f64>().ok())
+                                    .filter(|n| *n > 0.0)
+                                    .unwrap_or(0.0);
+                                let eta = parts
+                                    .get(5)
+                                    .and_then(|v| v.trim().parse::<f64>().ok())
+                                    .filter(|n| *n > 0.0);
+                                let pct = parts
+                                    .get(6)
+                                    .and_then(|v| v.trim().trim_end_matches('%').trim().parse::<f64>().ok())
+                                    .unwrap_or(0.0);
+                                if stream_status == "finished" && prev_status != "finished" {
+                                    base_bytes += down.max(total);
+                                }
+                                prev_status = stream_status.to_string();
+                                let downloaded = base_bytes + down;
+                                let total_bytes = base_bytes + total;
+                                let progress = if total_bytes > 0 {
+                                    downloaded as f64 / total_bytes as f64 * 100.0
+                                } else {
+                                    pct
+                                };
+                                if last_emit.elapsed() >= Duration::from_millis(400) {
+                                    last_emit = Instant::now();
+                                    with_task(&state, &app2, &id2, |t| {
+                                        t.downloaded = downloaded;
+                                        t.total = total_bytes;
+                                        t.speed = speed;
+                                        t.eta = eta;
+                                        if stream_status != "finished" && progress > t.progress {
+                                            t.progress = progress.min(99.5);
+                                        }
+                                    });
+                                }
+                            } else if line.contains("[Merger]")
+                                || line.contains("Merging formats")
+                                || line.contains("[ExtractAudio]")
+                            {
+                                with_task(&state, &app2, &id2, |t| {
+                                    t.status = TaskStatus::Merging;
+                                    t.progress = 99.5;
+                                    t.speed = 0.0;
+                                    t.eta = None;
+                                });
+                            }
+                        }
+                        Ok(None) => out_done = true,
+                        Err(_) => out_done = true,
+                    }
+                }
+                line = err_lines.next_line(), if !err_done => {
+                    match line {
+                        Ok(Some(line)) => {
+                            stderr_buf.push_str(&line);
+                            stderr_buf.push('\n');
+                            if stderr_buf.len() > 20_000 {
+                                stderr_buf = tail_chars(&stderr_buf, 20_000);
+                            }
+                        }
+                        _ => err_done = true,
+                    }
+                }
             }
-            s.save();
-            let _ = app2.emit("tasks:changed", s.data.tasks.clone());
         }
 
-        match child.wait_with_output().await {
-            Ok(o) if o.status.success() => {
-                let mut s = state.inner().lock().unwrap();
-                if let Some(t) = s.data.tasks.iter_mut().find(|t| t.id == id2) {
-                    t.status = TaskStatus::Completed;
-                    t.progress = 100.0;
-                    t.completed_at = Some(now_ms());
-                    t.speed = 0.0;
+        let wait = child.wait().await;
+
+        // 用户已取消 / 暂停的任务不要覆盖状态
+        let stopped = {
+            let s = state.inner().lock().unwrap();
+            s.data
+                .tasks
+                .iter()
+                .find(|t| t.id == id2)
+                .is_some_and(|t| matches!(&t.status, TaskStatus::Cancelled | TaskStatus::Paused))
+        };
+        if stopped {
+            return;
+        }
+
+        match wait {
+            Ok(status) if status.success() => {
+                let found = final_reported
+                    .filter(|p| p.is_file())
+                    .or_else(|| reported.filter(|p| p.is_file()))
+                    .or_else(|| newest_media_since(Path::new(&task_clone.save_dir), started));
+                match found {
+                    Some(path) if looks_like_media(&path) => {
+                        let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                        let file_path = path.to_string_lossy().to_string();
+                        with_task(&state, &app2, &id2, |t| {
+                            t.status = TaskStatus::Completed;
+                            t.progress = 100.0;
+                            t.completed_at = Some(now_ms());
+                            t.speed = 0.0;
+                            t.eta = None;
+                            if size > 0 {
+                                t.total = size;
+                                t.downloaded = size;
+                            }
+                            t.file_path = Some(file_path);
+                        });
+                    }
+                    Some(path) => {
+                        let detail = format!(
+                            "生成的文件无法识别为视频/音频（可能是网页或错误内容）：{}\n\n--- yt-dlp 输出 ---\n{}",
+                            path.display(),
+                            tail_chars(&stderr_buf, 4_000)
+                        );
+                        with_task(&state, &app2, &id2, |t| {
+                            t.status = TaskStatus::Failed;
+                            t.speed = 0.0;
+                            t.eta = None;
+                            t.error = Some("下载到的文件无法播放（可能被网站拦截或 Cookie 失效），请重试或配置 Cookie。".into());
+                            t.error_detail = Some(detail);
+                            t.needs_login = true;
+                        });
+                    }
+                    None => {
+                        with_task(&state, &app2, &id2, |t| {
+                            t.status = TaskStatus::Failed;
+                            t.speed = 0.0;
+                            t.eta = None;
+                            t.error = Some("下载已结束但没有生成文件（可能被网站拦截或 Cookie 失效）。".into());
+                            t.error_detail = Some(tail_chars(&stderr_buf, 4_000));
+                            t.needs_login = true;
+                        });
+                    }
                 }
-                s.save();
-                let _ = app2.emit("tasks:changed", s.data.tasks.clone());
             }
-            Ok(o) => {
-                let stderr = String::from_utf8_lossy(&o.stderr).to_string();
-                let mut s = state.inner().lock().unwrap();
-                if let Some(t) = s.data.tasks.iter_mut().find(|t| t.id == id2) {
+            Ok(status) => {
+                let detail = format!(
+                    "{}\n\n--- 退出状态 {} ---\n--- yt-dlp 输出 ---\n{}",
+                    task_clone.url,
+                    status,
+                    tail_chars(&stderr_buf, 4_000)
+                );
+                with_task(&state, &app2, &id2, |t| {
                     t.status = TaskStatus::Failed;
-                    t.error = Some(humanize_err(&stderr));
-                    t.error_detail = Some(stderr);
-                }
-                s.save();
-                let _ = app2.emit("tasks:changed", s.data.tasks.clone());
+                    t.speed = 0.0;
+                    t.eta = None;
+                    t.error = Some(humanize_err(&stderr_buf));
+                    t.error_detail = Some(detail);
+                    t.needs_login = needs_login_error(&stderr_buf);
+                });
             }
             Err(e) => {
-                let mut s = state.inner().lock().unwrap();
-                if let Some(t) = s.data.tasks.iter_mut().find(|t| t.id == id2) {
+                with_task(&state, &app2, &id2, |t| {
                     t.status = TaskStatus::Failed;
+                    t.speed = 0.0;
+                    t.eta = None;
                     t.error = Some(e.to_string());
-                }
-                s.save();
-                let _ = app2.emit("tasks:changed", s.data.tasks.clone());
+                });
             }
         }
     });
@@ -512,9 +817,95 @@ pub async fn open_save_dir(state: State<'_, Mutex<AppStore>>) -> Result<(), Stri
         s.data.settings.save_dir.clone()
     };
     let _ = fs::create_dir_all(&dir);
-    #[cfg(target_os = "windows")] { let _ = std::process::Command::new("explorer").arg(&dir).spawn(); }
-    #[cfg(target_os = "macos")] { let _ = std::process::Command::new("open").arg(&dir).spawn(); }
-    Ok(())
+    open_with_system(Path::new(&dir))
+}
+
+fn task_file_path(state: &State<'_, Mutex<AppStore>>, id: &str) -> Result<PathBuf, String> {
+    let raw = {
+        let s = state.inner().lock().map_err(|e| e.to_string())?;
+        s.data
+            .tasks
+            .iter()
+            .find(|t| t.id == id)
+            .and_then(|t| t.file_path.clone())
+    };
+    let raw = raw.ok_or_else(|| "该任务没有可打开的文件记录，请重新下载。".to_string())?;
+    let path = PathBuf::from(&raw);
+    if !path.is_file() {
+        return Err(format!("文件已被移动或删除：{raw}"));
+    }
+    Ok(path)
+}
+
+#[tauri::command]
+pub async fn open_task_file(state: State<'_, Mutex<AppStore>>, id: String) -> Result<(), String> {
+    let path = task_file_path(&state, &id)?;
+    #[cfg(target_os = "windows")]
+    {
+        let target = path.to_string_lossy().to_string();
+        let mut command = std::process::Command::new("cmd");
+        crate::ytdlp::hide_console(&mut command);
+        command
+            .args(["/C", "start", "", &target])
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("打开文件失败：{e}"))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::process::Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("打开文件失败：{e}"))
+    }
+}
+
+#[tauri::command]
+pub async fn reveal_task_file(state: State<'_, Mutex<AppStore>>, id: String) -> Result<(), String> {
+    let fallback_dir = || -> Option<String> {
+        state
+            .inner()
+            .lock()
+            .ok()
+            .map(|s| s.data.settings.save_dir.clone())
+    };
+    let path = match task_file_path(&state, &id) {
+        Ok(p) => p,
+        // 老任务没有记录文件路径，退回到下载目录
+        Err(_) => {
+            let dir = fallback_dir().unwrap_or_else(|| ".".to_string());
+            let _ = fs::create_dir_all(&dir);
+            return open_with_system(Path::new(&dir));
+        }
+    };
+    #[cfg(target_os = "windows")]
+    {
+        let arg = format!("/select,{}", path.display());
+        std::process::Command::new("explorer")
+            .arg(arg)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("打开文件夹失败：{e}"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(&path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("打开文件夹失败：{e}"))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let dir = path.parent().unwrap_or(Path::new("."));
+        std::process::Command::new("xdg-open")
+            .arg(dir)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("打开文件夹失败：{e}"))
+    }
 }
 
 #[tauri::command]
@@ -622,7 +1013,7 @@ pub async fn check_subscription(
             crate::subscriptions::fetch_flat_playlist(
                 &url,
                 &settings.proxy,
-                &settings.cookies_from_browser,
+                &settings,
             )
         })
         .await
@@ -700,6 +1091,30 @@ pub async fn sniffer_report(
     crate::browser::report(&window, state.inner(), url, page_url, title)
 }
 
+/// 内置浏览器侧栏拉取已捕获的媒体列表
+#[tauri::command]
+pub async fn sniffer_list(state: State<'_, Mutex<SnifferState>>) -> Result<Vec<SnifferPayload>, String> {
+    crate::browser::list(state.inner())
+}
+
+/// 侧栏点「添加」：仅接受已捕获列表中的地址
+#[tauri::command]
+pub async fn sniffer_enqueue(
+    app: AppHandle,
+    state: State<'_, Mutex<SnifferState>>,
+    url: String,
+) -> Result<(), String> {
+    crate::browser::enqueue(&app, state.inner(), &url)
+}
+
+/// 侧栏点「完成登录」：导出内置浏览器 Cookie 并通知主窗口重试
+#[tauri::command]
+pub async fn browser_login_done(app: AppHandle) -> Result<String, String> {
+    let path = crate::browser::export_cookies(&app).await?;
+    let _ = app.emit("browser:login-done", ());
+    Ok(path.to_string_lossy().to_string())
+}
+
 #[tauri::command]
 pub async fn submit_report(
     app: AppHandle,
@@ -739,7 +1154,17 @@ pub async fn open_external_url(url: String) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_json;
+    use super::{needs_login_error, parse_json};
+
+    #[test]
+    fn detects_login_required_failures() {
+        assert!(needs_login_error(
+            "ERROR: [Douyin] 123: Fresh cookies (not necessarily logged in) are needed"
+        ));
+        assert!(needs_login_error("ERROR: Sign in to confirm you're not a bot"));
+        assert!(needs_login_error("HTTP Error 403: Forbidden"));
+        assert!(!needs_login_error("ERROR: Unable to download webpage: timeout"));
+    }
 
     #[test]
     fn parsed_media_always_keeps_a_download_url() {

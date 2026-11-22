@@ -5,12 +5,14 @@ import { useApp } from '../state'
 import { STATUS_LABEL, formatBytes, formatEta, formatSpeed, formatTime } from '../utils'
 
 export function Thumb({ src, size = 'small' }: { src?: string; size?: 'small' | 'large' }): ReactElement {
+  // B 站等站点返回 http:// 缩略图，WebView 可能按混合内容拦截，统一升级为 https
+  const safeSrc = src?.startsWith('http://') ? `https://${src.slice('http://'.length)}` : src
   return (
     <div className={`thumb ${size}`}>
       <span className="thumb-fallback">
         <Icon name="video" size={size === 'large' ? 28 : 20} />
       </span>
-      {src ? <img src={src} alt="" loading="lazy" onError={(e) => (e.currentTarget.style.display = 'none')} /> : null}
+      {safeSrc ? <img src={safeSrc} alt="" loading="lazy" onError={(e) => (e.currentTarget.style.display = 'none')} /> : null}
     </div>
   )
 }
@@ -28,7 +30,7 @@ interface TaskCardProps {
 }
 
 export function TaskCard({ task, onDetail, selectable, selected, onSelect }: TaskCardProps): ReactElement {
-  const { taskAction } = useApp()
+  const { taskAction, loginFor } = useApp()
   const s = task.status
   const active = s === 'DOWNLOADING' || s === 'MERGING'
   const showProgress = active || s === 'PAUSED'
@@ -79,6 +81,11 @@ export function TaskCard({ task, onDetail, selectable, selected, onSelect }: Tas
             <span className="task-error-text" title={task.error}>
               {task.error}
             </span>
+            {task.needsLogin && (
+              <button className="btn-text" onClick={() => void loginFor(task.url, task.id)}>
+                去登录
+              </button>
+            )}
             {onDetail && (
               <button className="btn-text" onClick={() => onDetail(task)}>
                 查看详情

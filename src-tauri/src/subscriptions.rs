@@ -153,10 +153,12 @@ pub fn parse_flat_playlist(
 pub fn fetch_flat_playlist(
     url: &str,
     proxy: &str,
-    cookie_browser: &str,
+    settings: &crate::store::Settings,
 ) -> Result<Subscription, String> {
     let url = validate_http_url(url)?;
+    let cookies = crate::ytdlp::cookie_args(settings);
     let mut command = Command::new(crate::ytdlp::ytdlp_path());
+    crate::ytdlp::hide_console(&mut command);
     command.args([
         "-J",
         "--flat-playlist",
@@ -167,11 +169,7 @@ pub fn fetch_flat_playlist(
     if !proxy.trim().is_empty() {
         command.arg("--proxy").arg(proxy.trim());
     }
-    if !cookie_browser.trim().is_empty() {
-        command
-            .arg("--cookies-from-browser")
-            .arg(cookie_browser.trim());
-    }
+    command.args(&cookies.args);
     let output = command
         .arg(&url)
         .output()
