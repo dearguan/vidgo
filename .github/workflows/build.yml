@@ -62,11 +62,17 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      # 必须先构建前端：tauri::generate_context! 在编译期要求 frontendDist 存在
+      - name: Build frontend
+        run: npm run build
+
       - name: Lint — TypeScript 类型检查
         run: npm run typecheck
 
       - name: Lint — Rust clippy（警告即失败）
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+        run: |
+          cargo clippy --version
+          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
       - name: Build Tauri app (NSIS)
         run: npm run tauri build -- --bundles nsis
