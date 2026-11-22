@@ -46,6 +46,38 @@ fn get_ytdlp_ver() -> String {
         .unwrap_or_default()
 }
 
+/// 供问题上报模块附带解析引擎版本
+pub(crate) fn ytdlp_version() -> String {
+    get_ytdlp_ver()
+}
+
+#[cfg(target_os = "windows")]
+fn open_url(url: &str) -> Result<(), String> {
+    std::process::Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", url])
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("打开链接失败：{e}"))
+}
+
+#[cfg(target_os = "macos")]
+fn open_url(url: &str) -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("打开链接失败：{e}"))
+}
+
+#[cfg(target_os = "linux")]
+fn open_url(url: &str) -> Result<(), String> {
+    std::process::Command::new("xdg-open")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("打开链接失败：{e}"))
+}
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -88,12 +120,21 @@ pub async fn get_settings(state: State<'_, Mutex<AppStore>>) -> Result<Settings,
 #[tauri::command]
 pub async fn set_settings(
     state: State<'_, Mutex<AppStore>>,
-    new_settings: Settings,
+    new_settings: serde_json::Value,
 ) -> Result<Settings, String> {
     let mut s = state.inner().lock().map_err(|e| e.to_string())?;
-    s.data.settings = new_settings.clone();
-    s.save();
-    Ok(new_settings)
+    let mut current = serde_json::to_value(&s.data.settings)
+        .map_err(|e| format!("读取当前设置失败：{e}"))?;
+    if let (Some(target), Some(patch)) = (current.as_object_mut(), new_settings.as_object()) {
+        for (key, value) in patch {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+    let merged: Settings =
+        serde_json::from_value(current).map_err(|e| format!("设置格式不正确：{e}"))?;
+    s.data.settings = merged.clone();
+    s.save_result()?;
+    Ok(merged)
 }
 
 #[tauri::command]
@@ -657,6 +698,43 @@ pub async fn sniffer_report(
     title: String,
 ) -> Result<(), String> {
     crate::browser::report(&window, state.inner(), url, page_url, title)
+}
+
+#[tauri::command]
+pub async fn submit_report(
+    app: AppHandle,
+    state: State<'_, Mutex<AppStore>>,
+    input: crate::report::ReportInput,
+) -> Result<crate::report::ReportResult, String> {
+    crate::report::submit(&app, state.inner(), input).await
+}
+
+#[tauri::command]
+pub async fn check_update(
+    app: AppHandle,
+    state: State<'_, Mutex<AppStore>>,
+) -> Result<crate::update::UpdateInfo, String> {
+    crate::update::check(&app, state.inner()).await
+}
+
+#[tauri::command]
+pub async fn install_update(
+    app: AppHandle,
+    state: State<'_, Mutex<AppStore>>,
+    asset_url: String,
+    sha256: Option<String>,
+    size: Option<u64>,
+) -> Result<(), String> {
+    crate::update::install(&app, state.inner(), &asset_url, sha256, size).await
+}
+
+#[tauri::command]
+pub async fn open_external_url(url: String) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url.trim()).map_err(|_| "链接格式不正确。".to_string())?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err("只允许打开 http 或 https 链接。".into());
+    }
+    open_url(parsed.as_str())
 }
 
 #[cfg(test)]

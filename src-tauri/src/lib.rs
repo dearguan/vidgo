@@ -2,8 +2,11 @@
 mod browser;
 mod commands;
 mod library;
+mod net;
+mod report;
 mod store;
 mod subscriptions;
+mod update;
 mod ytdlp;
 
 use std::sync::Mutex;
@@ -50,6 +53,10 @@ pub fn run() -> tauri::Result<()> {
             commands::close_builtin_browser,
             commands::check_builtin_cookies,
             commands::sniffer_report,
+            commands::submit_report,
+            commands::check_update,
+            commands::install_update,
+            commands::open_external_url,
         ])
         // 与 commands.rs 中 State<'_, Mutex<AppStore>> 的类型保持一致
         .manage(Mutex::new(store))

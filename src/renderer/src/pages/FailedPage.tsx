@@ -5,6 +5,7 @@ import { useApp } from '../state'
 import { ERROR_KIND_LABEL, classifyError, formatTime, type ErrorKind } from '../utils'
 import { TaskCard } from '../components/TaskCard'
 import { Modal } from '../components/Modal'
+import { ReportDialog } from '../components/ReportDialog'
 
 const REASON: Record<ErrorKind, string> = {
   network: '可能是网络连接中断、代理不可用或目标网站响应缓慢。',
@@ -15,7 +16,15 @@ const REASON: Record<ErrorKind, string> = {
   other: '下载引擎返回了未分类错误，可根据技术详情进一步判断。'
 }
 
-function DiagnosisModal({ task, onClose }: { task: DownloadTask; onClose: () => void }): ReactElement {
+function DiagnosisModal({
+  task,
+  onClose,
+  onReport
+}: {
+  task: DownloadTask
+  onClose: () => void
+  onReport: () => void
+}): ReactElement {
   const { taskAction, notify, setView } = useApp()
   const [showDetail, setShowDetail] = useState(false)
   const kind = classifyError(task.error)
@@ -63,6 +72,9 @@ function DiagnosisModal({ task, onClose }: { task: DownloadTask; onClose: () => 
           >
             复制日志
           </button>
+          <button className="btn secondary small" onClick={onReport}>
+            上报给开发者
+          </button>
         </div>
       </div>
       <div className="diag-section">
@@ -84,6 +96,7 @@ export function FailedPage(): ReactElement {
   const { tasks, taskAction, notify } = useApp()
   const [kind, setKind] = useState<ErrorKind | 'all'>('all')
   const [detail, setDetail] = useState<DownloadTask | null>(null)
+  const [reportTask, setReportTask] = useState<DownloadTask | null>(null)
 
   const failed = tasks.filter((t) => t.status === 'FAILED' || t.status === 'CANCELLED')
   const list = kind === 'all' ? failed : failed.filter((t) => classifyError(t.error) === kind)
@@ -139,7 +152,30 @@ export function FailedPage(): ReactElement {
         </div>
       )}
 
-      {detail && <DiagnosisModal task={detail} onClose={() => setDetail(null)} />}
+      {detail && (
+        <DiagnosisModal
+          task={detail}
+          onClose={() => setDetail(null)}
+          onReport={() => {
+            setReportTask(detail)
+            setDetail(null)
+          }}
+        />
+      )}
+
+      {reportTask && (
+        <ReportDialog
+          input={{
+            kind: 'download',
+            title: reportTask.title,
+            url: reportTask.url,
+            message: reportTask.error ?? '下载失败',
+            detail: reportTask.errorDetail,
+            taskId: reportTask.id
+          }}
+          onClose={() => setReportTask(null)}
+        />
+      )}
     </div>
   )
 }

@@ -20,6 +20,15 @@ pub struct Settings {
     pub clipboard_watch: bool,
     #[serde(default, rename = "cookieBrowser")]
     pub cookies_from_browser: String,
+    /// 仅保存在本机的 GitHub Token，用于把问题上报为 Issue
+    #[serde(default)]
+    pub github_token: String,
+    #[serde(default = "default_report_repo")]
+    pub report_repo: String,
+}
+
+fn default_report_repo() -> String {
+    "dearguan/vidgo".into()
 }
 
 fn default_save_dir() -> String {
@@ -48,6 +57,8 @@ impl Default for Settings {
             theme: default_theme(),
             clipboard_watch: true,
             cookies_from_browser: String::new(),
+            github_token: String::new(),
+            report_repo: default_report_repo(),
         }
     }
 }
@@ -167,6 +178,8 @@ mod tests {
         assert!(data.subscriptions.is_empty());
         assert!(data.tasks.is_empty());
         assert_eq!(data.settings.save_dir, "/tmp/vidgo");
+        assert!(data.settings.github_token.is_empty());
+        assert_eq!(data.settings.report_repo, "dearguan/vidgo");
 
         let serialized = serde_json::to_value(&data).unwrap();
         assert_eq!(

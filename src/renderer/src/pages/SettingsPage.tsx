@@ -46,12 +46,29 @@ function Row({ label, hint, children }: { label: string; hint?: string; children
 }
 
 export function SettingsPage(): ReactElement {
-  const { settings, appInfo, updateSettings, chooseDir, openBuiltinBrowser, notify } = useApp()
+  const {
+    settings,
+    appInfo,
+    updateSettings,
+    chooseDir,
+    openBuiltinBrowser,
+    notify,
+    updateInfo,
+    checkingUpdate,
+    installingUpdate,
+    updateProgress,
+    checkUpdate,
+    installUpdate
+  } = useApp()
   const [proxy, setProxy] = useState('')
+  const [token, setToken] = useState('')
+  const [repo, setRepo] = useState('')
 
   useEffect(() => {
     setProxy(settings?.proxy ?? '')
-  }, [settings?.proxy])
+    setToken(settings?.githubToken ?? '')
+    setRepo(settings?.reportRepo ?? '')
+  }, [settings?.proxy, settings?.githubToken, settings?.reportRepo])
 
   if (!settings) return <div className="page" />
 
@@ -174,10 +191,77 @@ export function SettingsPage(): ReactElement {
         </Row>
       </Group>
 
-      <Group title="关于与诊断">
-        <Row label="软件版本">
-          <span className="muted-text">Vidgo v{appInfo?.version ?? '0.2.0'}</span>
+      <Group title="版本与更新">
+        <Row label="软件版本" hint="发现新版本后可在此直接安装，安装完成后会自动重启">
+          <div className="settings-inline">
+            <span className="muted-text">v{appInfo?.version ?? '…'}</span>
+            <button
+              className="btn secondary small"
+              disabled={checkingUpdate || installingUpdate}
+              onClick={() => void checkUpdate()}
+            >
+              {checkingUpdate ? '检查中…' : '检查更新'}
+            </button>
+          </div>
         </Row>
+        {updateInfo?.available ? (
+          <div className="update-card">
+            <div className="update-card-text">
+              <strong>发现新版本 v{updateInfo.latest}</strong>
+              <span className="muted-text">
+                {installingUpdate && updateProgress && updateProgress.total > 0
+                  ? `正在下载 ${Math.min(100, Math.round((updateProgress.downloaded / updateProgress.total) * 100))}%`
+                  : `当前 v${updateInfo.current}，更新后自动重启`}
+              </span>
+            </div>
+            <button className="btn primary small" disabled={installingUpdate} onClick={() => void installUpdate()}>
+              {installingUpdate ? '更新中…' : '立即更新'}
+            </button>
+          </div>
+        ) : updateInfo ? (
+          <Row label="更新状态">
+            <span className="muted-text">已是最新版本</span>
+          </Row>
+        ) : null}
+      </Group>
+
+      <Group title="问题反馈">
+        <Row
+          label="GitHub Token"
+          hint="填写一次即可。需要该仓库的 Issues 读写权限（GitHub → Settings → Developer settings → Personal access tokens）。只保存在本机，不会随安装包分发。留空则报告仅保存在本机。"
+        >
+          <input
+            className="input"
+            type="password"
+            value={token}
+            placeholder="github_pat_…"
+            aria-label="GitHub Token"
+            onChange={(e) => setToken(e.target.value)}
+            onBlur={() => {
+              if (token.trim() !== (settings.githubToken ?? '')) patch({ githubToken: token.trim() })
+            }}
+          />
+        </Row>
+        <Row label="上报仓库" hint="格式为 owner/repo，例如 dearguan/vidgo">
+          <input
+            className="input"
+            value={repo}
+            placeholder="dearguan/vidgo"
+            aria-label="上报仓库"
+            onChange={(e) => setRepo(e.target.value)}
+            onBlur={() => {
+              if (repo.trim() !== settings.reportRepo) patch({ reportRepo: repo.trim() })
+            }}
+          />
+        </Row>
+        <Row label="当前状态" hint="解析失败或下载失败时，点击“上报给开发者”会自动创建 Issue 并附带诊断信息。">
+          <span className="muted-text">
+            {settings.githubToken ? '已配置 Token，可直接上报' : '未配置 Token，报告只会保存在本机'}
+          </span>
+        </Row>
+      </Group>
+
+      <Group title="关于与诊断">
         <Row label="解析引擎" hint="yt-dlp，随软件内置，无需安装 Python">
           <span className="muted-text">{appInfo?.ytdlp ?? '读取中…'}</span>
         </Row>

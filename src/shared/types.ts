@@ -109,6 +109,48 @@ export interface Settings {
   concurrency: number
   theme: ThemeMode
   clipboardWatch: boolean
+  /** 仅保存在本机，用于把问题上报为 GitHub Issue */
+  githubToken: string
+  reportRepo: string
+}
+
+export type ReportKind = 'parse' | 'download' | 'bug'
+
+export interface ReportInput {
+  kind: ReportKind
+  title: string
+  url?: string
+  message?: string
+  detail?: string
+  taskId?: string
+  note?: string
+  jsErrors?: string[]
+}
+
+export interface ReportResult {
+  reportId: string
+  mode: 'github' | 'local'
+  issueUrl?: string
+  issueNumber?: number
+  savedPath: string
+  uploadError?: string
+  text: string
+}
+
+export interface UpdateInfo {
+  available: boolean
+  current: string
+  latest: string
+  notes?: string
+  assetUrl?: string
+  assetSize?: number
+  sha256?: string
+  publishedAt?: string
+}
+
+export interface UpdateProgress {
+  downloaded: number
+  total: number
 }
 
 export interface StartDownloadPayload {
@@ -156,6 +198,11 @@ export interface Api {
   deleteSubscription?(id: string): Promise<void>
   checkBuiltinCookies(url: string): Promise<number>
   readClipboard(): Promise<string>
+  submitReport?(input: ReportInput): Promise<ReportResult>
+  checkUpdate?(): Promise<UpdateInfo>
+  installUpdate?(assetUrl: string, sha256?: string, size?: number): Promise<void>
+  openExternal?(url: string): Promise<void>
+  onUpdateProgress?(cb: (progress: UpdateProgress) => void): () => void
   onTasksChanged(cb: (tasks: DownloadTask[]) => void): () => void
   onSnifferFound(cb: (media: SniffedMedia) => void): () => void
 }

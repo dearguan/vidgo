@@ -11,10 +11,14 @@ import type {
   DownloadTask,
   LibraryFile,
   ParseResult,
+  ReportInput,
+  ReportResult,
   Settings,
   SniffedMedia,
   Subscription,
-  SubscriptionCheckResult
+  SubscriptionCheckResult,
+  UpdateInfo,
+  UpdateProgress
 } from '../../shared/types'
 
 type Listener<T> = (cb: (data: T) => void) => () => void
@@ -89,6 +93,15 @@ const electronApi = {
     (globalThis as any).window?.api?.deleteSubscription?.(id) ?? unsupported('删除订阅'),
   checkBuiltinCookies: (url: string): Promise<number> =>
     (globalThis as any).window?.api?.checkBuiltinCookies?.(url) ?? Promise.resolve(0),
+  submitReport: (_input: ReportInput): Promise<ReportResult> => unsupported('问题上报'),
+  checkUpdate: (): Promise<UpdateInfo> => unsupported('检查更新'),
+  installUpdate: (_assetUrl?: string, _sha256?: string, _size?: number): Promise<void> =>
+    unsupported('自动更新'),
+  openExternal: (url: string): Promise<void> => {
+    window.open(url, '_blank')
+    return Promise.resolve()
+  },
+  onUpdateProgress: (): (() => void) => () => {},
   onTasksChanged: (cb: (tasks: DownloadTask[]) => void): (() => void) =>
     (globalThis as any).window?.api?.onTasksChanged?.(cb) ?? (() => {}),
   onSnifferFound: (cb: (media: SniffedMedia) => void): (() => void) =>
@@ -150,6 +163,16 @@ const tauriApi = {
   checkSubscription: (id: string) => tauriApi.invoke<SubscriptionCheckResult>('check_subscription', { id }),
   deleteSubscription: (id: string) => tauriApi.invoke<void>('delete_subscription', { id }),
   checkBuiltinCookies: (url: string) => tauriApi.invoke<number>('check_builtin_cookies', { url }),
+  submitReport: (input: ReportInput) => tauriApi.invoke<ReportResult>('submit_report', { input }),
+  checkUpdate: () => tauriApi.invoke<UpdateInfo>('check_update'),
+  installUpdate: (assetUrl: string, sha256?: string, size?: number) =>
+    tauriApi.invoke<void>('install_update', { assetUrl, sha256, size }),
+  openExternal: (url: string) => tauriApi.invoke<void>('open_external_url', { url }),
+  onUpdateProgress: (cb: (progress: UpdateProgress) => void): (() => void) => {
+    let un: (() => void) | null = null
+    tauriApi.listen<UpdateProgress>('update:progress', cb).then((fn) => { un = fn })
+    return () => { un?.() }
+  },
   onTasksChanged: (cb: (tasks: DownloadTask[]) => void): (() => void) => {
     let un: (() => void) | null = null
     tauriApi.listen<DownloadTask[]>('tasks:changed', cb).then((fn) => { un = fn })

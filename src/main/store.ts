@@ -22,7 +22,9 @@ export class Store {
         cookieBrowser: 'auto',
         concurrency: 3,
         theme: 'system',
-        clipboardWatch: true
+        clipboardWatch: true,
+        githubToken: '',
+        reportRepo: 'dearguan/vidgo'
       },
       tasks: []
     }

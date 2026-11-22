@@ -5,6 +5,7 @@ import { useApp } from '../state'
 import { api } from '../api'
 import { formatBytes, formatDuration, isHttpUrl } from '../utils'
 import { Thumb } from '../components/TaskCard'
+import { ReportDialog } from '../components/ReportDialog'
 
 function middleEllipsis(text: string, max = 46): string {
   if (text.length <= max) return text
@@ -26,6 +27,7 @@ export function HomePage(): ReactElement {
   const [showDetail, setShowDetail] = useState(false)
   const [clipHint, setClipHint] = useState('')
   const [urlInvalid, setUrlInvalid] = useState(false)
+  const [reportOpen, setReportOpen] = useState(false)
   const seq = useRef(0)
 
   const valid = isHttpUrl(url)
@@ -351,6 +353,10 @@ export function HomePage(): ReactElement {
               <Icon name="copy" size={15} />
               复制技术详情
             </button>
+            <button className="btn secondary" onClick={() => setReportOpen(true)}>
+              <Icon name="info" size={15} />
+              上报给开发者
+            </button>
             {parseError.detail && (
               <button className="btn-text" onClick={() => setShowDetail((v) => !v)}>
                 {showDetail ? '收起详情' : '展开详情'}
@@ -373,6 +379,19 @@ export function HomePage(): ReactElement {
             <Icon name="chevronRight" size={14} />
           </button>
         </div>
+      )}
+
+      {reportOpen && parseError && (
+        <ReportDialog
+          input={{
+            kind: 'parse',
+            title: `解析失败：${url}`,
+            url,
+            message: parseError.message,
+            detail: parseError.detail
+          }}
+          onClose={() => setReportOpen(false)}
+        />
       )}
     </div>
   )

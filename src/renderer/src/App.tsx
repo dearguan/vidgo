@@ -1,4 +1,4 @@
-import type { ReactElement } from 'react'
+import { useState, type ReactElement } from 'react'
 import { AppProvider, useApp } from './state'
 import { Icon, Logo } from './Icon'
 import { ACTIVE_STATUS, type View } from './utils'
@@ -24,7 +24,18 @@ const PAGE_TITLE: Record<View, { title: string; sub?: string }> = {
 }
 
 function Shell(): ReactElement {
-  const { view, setView, tasks, toasts, appInfo } = useApp()
+  const {
+    view,
+    setView,
+    tasks,
+    toasts,
+    appInfo,
+    updateInfo,
+    installingUpdate,
+    updateProgress,
+    installUpdate
+  } = useApp()
+  const [bannerHidden, setBannerHidden] = useState(false)
   const activeCount = tasks.filter((t) => ACTIVE_STATUS.includes(t.status) || t.status === 'PAUSED').length
   const completedCount = tasks.filter((t) => t.status === 'COMPLETED').length
   const failedCount = tasks.filter((t) => t.status === 'FAILED' || t.status === 'CANCELLED').length
@@ -99,6 +110,24 @@ function Shell(): ReactElement {
             {PAGE_TITLE[view].sub && <span>{PAGE_TITLE[view].sub}</span>}
           </div>
         </header>
+
+        {updateInfo?.available && !bannerHidden && (
+          <div className="update-banner">
+            <Icon name="download" size={16} />
+            <span className="update-banner-text">
+              发现新版本 v{updateInfo.latest}
+              {installingUpdate && updateProgress && updateProgress.total > 0
+                ? `，正在下载 ${Math.min(100, Math.round((updateProgress.downloaded / updateProgress.total) * 100))}%`
+                : ''}
+            </span>
+            <button className="btn primary small" disabled={installingUpdate} onClick={() => void installUpdate()}>
+              {installingUpdate ? '更新中…' : '立即更新'}
+            </button>
+            <button className="btn-text muted" onClick={() => setBannerHidden(true)}>
+              稍后
+            </button>
+          </div>
+        )}
 
         <main className="page-scroll">
           {view === 'home' && <HomePage />}
