@@ -91,7 +91,6 @@ pub struct ParseResult {
 
 pub fn build_download_args(
     url: &str,
-    _title: &str,
     selector: &str,
     save_dir: &str,
     proxy: &str,
@@ -114,6 +113,12 @@ pub fn build_download_args(
         "--print".into(),
         "before_dl:VGFILE|%(filepath)s".into(),
     ];
+    // 明确告诉 yt-dlp 用随包附带的 ffmpeg（合并 DASH 音视频 / 转 MP3 必需）
+    let ff = ffmpeg_path();
+    if ff.exists() {
+        args.push("--ffmpeg-location".into());
+        args.push(ff.to_string_lossy().to_string());
+    }
     if let Some(af) = audio_format {
         if af != "none" {
             args.push("--extract-audio".into());

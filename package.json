@@ -1,6 +1,6 @@
 {
   "name": "vidgo",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "VideoGo - Windows 视频下载器",
   "main": "./out/main/index.js",
   "author": "VideoGo",
@@ -10,6 +10,8 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "check": "npm run typecheck",
+    "lint:rust": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
     "dist:win": "electron-vite build && electron-builder --win --x64",
     "tauri": "tauri"
   },

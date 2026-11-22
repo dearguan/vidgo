@@ -112,7 +112,7 @@ export function AppProvider({ children }: { children: ReactNode }): ReactElement
   }, [])
 
   const taskAction = useCallback((action: TaskAction, id: string, deleteFile = false) => {
-    const map: Record<TaskAction, (id: string) => Promise<void>> = {
+    const map: Record<TaskAction, (id: string) => Promise<unknown>> = {
       pause: api.pauseTask,
       resume: api.resumeTask,
       cancel: api.cancelTask,

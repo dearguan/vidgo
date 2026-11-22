@@ -61,6 +61,12 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      - name: Lint — TypeScript 类型检查
+        run: npm run typecheck
+
+      - name: Lint — Rust clippy（警告即失败）
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
       - name: Build Tauri app (NSIS)
         run: npm run tauri build -- --bundles nsis
 

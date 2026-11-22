@@ -150,7 +150,7 @@ fn humanize_err(detail: &str) -> String {
 
 fn parse_json(raw: &str) -> Result<MediaInfo, String> {
     #[derive(serde::Deserialize)]
-    struct F { format_id: Option<String>, height: Option<u16>, vcodec: Option<String> }
+    struct F { height: Option<u16>, vcodec: Option<String> }
     #[derive(serde::Deserialize)]
     struct R {
         id: Option<String>, title: Option<String>, thumbnail: Option<String>,
@@ -161,7 +161,7 @@ fn parse_json(raw: &str) -> Result<MediaInfo, String> {
     let r: R = serde_json::from_str(raw).map_err(|e| e.to_string())?;
     let formats = r.formats.unwrap_or_default();
     let mut hs: Vec<u16> = formats
-        .iter().filter(|f| f.vcodec.as_deref().map_or(false, |v| v != "none"))
+        .iter().filter(|f| f.vcodec.as_deref().is_some_and(|v| v != "none"))
         .filter_map(|f| f.height).collect();
     hs.sort_unstable_by(|a, b| b.cmp(a));
     hs.dedup();
@@ -255,11 +255,11 @@ pub async fn start_download(
         }
 
         let args = ytdlp::build_download_args(
-            &task_clone.url, &task_clone.title, &task_clone.selector, &task_clone.save_dir,
+            &task_clone.url, &task_clone.selector, &task_clone.save_dir,
             &settings.proxy, &settings.cookies_from_browser,
             task_clone.audio_format.as_deref(), task_clone.height,
         );
-        let mut child = match Command::new(ytdlp_path()).args(&args).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+        let child = match Command::new(ytdlp_path()).args(&args).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
             Ok(c) => c,
             Err(e) => {
                 let mut s = state.inner().lock().unwrap();

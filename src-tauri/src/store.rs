@@ -57,20 +57,6 @@ pub enum TaskStatus {
     Cancelled,
 }
 
-impl TaskStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Waiting => "WAITING",
-            Self::Downloading => "DOWNLOADING",
-            Self::Merging => "MERGING",
-            Self::Paused => "PAUSED",
-            Self::Completed => "COMPLETED",
-            Self::Failed => "FAILED",
-            Self::Cancelled => "CANCELLED",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DownloadTask {

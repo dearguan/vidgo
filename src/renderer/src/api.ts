@@ -86,17 +86,21 @@ const tauriApi = {
   getTasks: () => tauriApi.invoke<DownloadTask[]>('get_tasks'),
   openSaveDir: () => tauriApi.invoke<void>('open_save_dir'),
   chooseDir: async (): Promise<string | null> => {
-    const { dialog } = await import('@tauri-apps/plugin-dialog')
-    const res = await dialog.open({ directory: true, multiple: false })
+    const { open } = await import('@tauri-apps/plugin-dialog')
+    const res = await open({ directory: true, multiple: false })
     if (!res) return null
-    return typeof res === 'string' ? res : res as any
+    return typeof res === 'string' ? res : (res as any)
   },
   getSettings: () => tauriApi.invoke<Settings>('get_settings'),
   setSettings: (patch: Partial<Settings>) => tauriApi.invoke<Settings>('set_settings', { newSettings: patch }),
   getAppInfo: () => tauriApi.invoke<AppInfo>('get_app_info'),
   readClipboard: async () => {
-    const { getText } = await import('@tauri-apps/plugin-clipboard-manager')
-    try { return await getText() } catch { return '' }
+    const { readText } = await import('@tauri-apps/plugin-clipboard-manager')
+    try {
+      return (await readText()) ?? ''
+    } catch {
+      return ''
+    }
   },
   openBuiltinBrowser: () => tauriApi.invoke<void>('open_builtin_browser'),
   checkBuiltinCookies: (url: string) => tauriApi.invoke<number>('check_builtin_cookies', { url }),
