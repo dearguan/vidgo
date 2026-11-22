@@ -60,11 +60,44 @@ export interface DownloadTask {
 
 export type ThemeMode = 'system' | 'light' | 'dark'
 
+export interface LibraryFile {
+  path: string
+  name: string
+  extension: string
+  size: number
+  modifiedAt: number
+}
+
+export interface SubscriptionEntry {
+  entryId: string
+  url: string
+  title: string
+  thumbnail?: string
+  duration?: number
+  uploadDate?: string
+  firstSeenAt: number
+}
+
+export interface Subscription {
+  id: string
+  url: string
+  title: string
+  createdAt: number
+  lastCheckedAt?: number
+  entries: SubscriptionEntry[]
+}
+
+export interface SubscriptionCheckResult {
+  subscription: Subscription
+  newEntryIds: string[]
+}
+
 export interface SniffedMedia {
   id: string
   url: string
   type: 'mp4' | 'webm' | 'hls' | 'dash' | 'm4a' | 'mp3' | 'unknown'
   title?: string
+  pageUrl?: string
   timestamp: number
 }
 
@@ -109,7 +142,18 @@ export interface Api {
   setSettings(patch: Partial<Settings>): Promise<Settings>
   getAppInfo(): Promise<AppInfo>
   chooseDir(): Promise<string | null>
-  openBuiltinBrowser(): Promise<void>
+  listLibraryFiles?(): Promise<LibraryFile[]>
+  openLibraryFile?(path: string): Promise<void>
+  openLibraryFolder?(path: string): Promise<void>
+  deleteLibraryFile?(path: string): Promise<void>
+  openBuiltinBrowser(url?: string): Promise<void>
+  navigateBuiltinBrowser?(url: string): Promise<void>
+  reloadBuiltinBrowser?(): Promise<void>
+  closeBuiltinBrowser?(): Promise<void>
+  listSubscriptions?(): Promise<Subscription[]>
+  addSubscription?(url: string): Promise<Subscription>
+  checkSubscription?(id: string): Promise<SubscriptionCheckResult>
+  deleteSubscription?(id: string): Promise<void>
   checkBuiltinCookies(url: string): Promise<number>
   readClipboard(): Promise<string>
   onTasksChanged(cb: (tasks: DownloadTask[]) => void): () => void

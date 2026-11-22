@@ -1,6 +1,6 @@
 import type { DownloadTask } from '../../shared/types'
 
-export type View = 'home' | 'downloading' | 'completed' | 'failed' | 'settings'
+export type View = 'home' | 'downloading' | 'completed' | 'failed' | 'library' | 'capture' | 'subscriptions' | 'settings'
 
 export const ACTIVE_STATUS: DownloadTask['status'][] = ['WAITING', 'PARSING', 'READY', 'DOWNLOADING', 'MERGING']
 

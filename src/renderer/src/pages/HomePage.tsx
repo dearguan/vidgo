@@ -14,7 +14,7 @@ function middleEllipsis(text: string, max = 46): string {
 }
 
 export function HomePage(): ReactElement {
-  const { settings, chooseDir, notify, setView } = useApp()
+  const { settings, chooseDir, notify, setView, parseRequest, clearParseRequest } = useApp()
   const [url, setUrl] = useState('')
   const [media, setMedia] = useState<MediaInfo | null>(null)
   const [formatId, setFormatId] = useState('')
@@ -56,8 +56,9 @@ export function HomePage(): ReactElement {
     }
   }, [settings?.clipboardWatch])
 
-  const startParse = useCallback(async () => {
-    const target = url.trim()
+  const startParse = useCallback(async (requestedUrl?: string) => {
+    const target = (requestedUrl ?? url).trim()
+    if (requestedUrl !== undefined) setUrl(target)
     if (!isHttpUrl(target)) {
       setUrlInvalid(true)
       return
@@ -68,18 +69,33 @@ export function HomePage(): ReactElement {
     setMedia(null)
     setParseError(null)
     setShowDetail(false)
-    const result = await api.parse(target)
-    if (id !== seq.current) return
-    setParsing(false)
-    if (result.ok) {
-      setMedia(result.info)
-      setFormatId(result.info.formats.find((f) => f.kind === 'video')?.id ?? '')
-      setAudioId(result.info.formats.find((f) => f.kind === 'audio')?.id ?? '')
-      setAudioOnly(false)
-    } else if (result.message !== '已取消解析') {
-      setParseError({ message: result.message, detail: result.detail })
+    try {
+      const result = await api.parse(target)
+      if (id !== seq.current) return
+      if (result.ok) {
+        setMedia(result.info)
+        setFormatId(result.info.formats.find((f) => f.kind === 'video')?.id ?? '')
+        setAudioId(result.info.formats.find((f) => f.kind === 'audio')?.id ?? '')
+        setAudioOnly(false)
+      } else if (result.message !== '已取消解析') {
+        setParseError({ message: result.message, detail: result.detail })
+      }
+    } catch (e) {
+      if (id === seq.current) {
+        setParseError({ message: e instanceof Error ? e.message : String(e) })
+      }
+    } finally {
+      if (id === seq.current) setParsing(false)
     }
   }, [url])
+
+  useEffect(() => {
+    if (!parseRequest) return
+    setClipHint('')
+    const target = parseRequest.url
+    clearParseRequest()
+    void startParse(target)
+  }, [parseRequest, startParse, clearParseRequest])
 
   const cancelParse = (): void => {
     seq.current++
@@ -169,7 +185,7 @@ export function HomePage(): ReactElement {
           <Icon name="clipboard" size={15} />
           从剪贴板粘贴
         </button>
-        <button className="btn-text" disabled title="后续版本提供">
+        <button className="btn-text" onClick={() => setView('capture')}>
           <Icon name="globe" size={15} />
           打开网页捕获
         </button>

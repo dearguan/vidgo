@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-sniffer-report"
+description = "Allows only the built-in browser to report detected media URLs."
+commands.allow = ["sniffer_report"]

@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "builtin-browser",
+  "description": "仅允许内置浏览器远程页面上报嗅探到的媒体地址",
+  "windows": ["builtin-browser"],
+  "local": false,
+  "remote": {
+    "urls": ["http://*/*", "https://*/*", "http://*:*/*", "https://*:*/*"]
+  },
+  "permissions": ["allow-sniffer-report"]
+}

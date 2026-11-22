@@ -1,0 +1,33 @@
+[[permission]]
+identifier = "allow-main-commands"
+description = "Allows the local main window to use Vidgo application commands."
+commands.allow = [
+  "parse_media",
+  "parse_cancel",
+  "start_download",
+  "pause_task",
+  "resume_task",
+  "cancel_task",
+  "remove_task",
+  "redownload_task",
+  "get_tasks",
+  "open_save_dir",
+  "choose_dir",
+  "get_settings",
+  "set_settings",
+  "get_app_info",
+  "read_clipboard",
+  "list_library_files",
+  "open_library_file",
+  "open_library_folder",
+  "delete_library_file",
+  "list_subscriptions",
+  "add_subscription",
+  "check_subscription",
+  "delete_subscription",
+  "open_builtin_browser",
+  "navigate_builtin_browser",
+  "reload_builtin_browser",
+  "close_builtin_browser",
+  "check_builtin_cookies",
+]

@@ -6,12 +6,25 @@
  * 这样 src/renderer/src/ 下所有 React 组件不用改。
  */
 
-import type { DownloadTask, ParseResult, Settings, AppInfo, SniffedMedia } from '../../shared/types'
+import type {
+  AppInfo,
+  DownloadTask,
+  LibraryFile,
+  ParseResult,
+  Settings,
+  SniffedMedia,
+  Subscription,
+  SubscriptionCheckResult
+} from '../../shared/types'
 
 type Listener<T> = (cb: (data: T) => void) => () => void
 
 function isTauri(): boolean {
   return typeof (globalThis as any).__TAURI__ !== 'undefined'
+}
+
+function unsupported(feature: string): Promise<never> {
+  return Promise.reject(new Error(`当前运行时不支持${feature}`))
 }
 
 // ---------- Electron 实现 ----------
@@ -50,8 +63,30 @@ const electronApi = {
     (globalThis as any).window?.api?.getAppInfo?.() ?? Promise.resolve({ version: '0.0.0', ytdlp: '' }),
   readClipboard: (): Promise<string> =>
     (globalThis as any).window?.api?.readClipboard?.() ?? Promise.resolve(''),
-  openBuiltinBrowser: (): Promise<void> =>
-    (globalThis as any).window?.api?.openBuiltinBrowser?.() ?? Promise.resolve(),
+  listLibraryFiles: (): Promise<LibraryFile[]> =>
+    (globalThis as any).window?.api?.listLibraryFiles?.() ?? Promise.resolve([]),
+  openLibraryFile: (path: string): Promise<void> =>
+    (globalThis as any).window?.api?.openLibraryFile?.(path) ?? unsupported('打开视频库文件'),
+  openLibraryFolder: (path: string): Promise<void> =>
+    (globalThis as any).window?.api?.openLibraryFolder?.(path) ?? unsupported('打开文件所在目录'),
+  deleteLibraryFile: (path: string): Promise<void> =>
+    (globalThis as any).window?.api?.deleteLibraryFile?.(path) ?? unsupported('删除视频库文件'),
+  openBuiltinBrowser: (url?: string): Promise<void> =>
+    (globalThis as any).window?.api?.openBuiltinBrowser?.(url) ?? unsupported('打开内置浏览器'),
+  navigateBuiltinBrowser: (url: string): Promise<void> =>
+    (globalThis as any).window?.api?.navigateBuiltinBrowser?.(url) ?? unsupported('内置浏览器导航'),
+  reloadBuiltinBrowser: (): Promise<void> =>
+    (globalThis as any).window?.api?.reloadBuiltinBrowser?.() ?? unsupported('刷新内置浏览器'),
+  closeBuiltinBrowser: (): Promise<void> =>
+    (globalThis as any).window?.api?.closeBuiltinBrowser?.() ?? unsupported('关闭内置浏览器'),
+  listSubscriptions: (): Promise<Subscription[]> =>
+    (globalThis as any).window?.api?.listSubscriptions?.() ?? Promise.resolve([]),
+  addSubscription: (url: string): Promise<Subscription> =>
+    (globalThis as any).window?.api?.addSubscription?.(url) ?? unsupported('添加订阅'),
+  checkSubscription: (id: string): Promise<SubscriptionCheckResult> =>
+    (globalThis as any).window?.api?.checkSubscription?.(id) ?? unsupported('检查订阅'),
+  deleteSubscription: (id: string): Promise<void> =>
+    (globalThis as any).window?.api?.deleteSubscription?.(id) ?? unsupported('删除订阅'),
   checkBuiltinCookies: (url: string): Promise<number> =>
     (globalThis as any).window?.api?.checkBuiltinCookies?.(url) ?? Promise.resolve(0),
   onTasksChanged: (cb: (tasks: DownloadTask[]) => void): (() => void) =>
@@ -102,7 +137,18 @@ const tauriApi = {
       return ''
     }
   },
-  openBuiltinBrowser: () => tauriApi.invoke<void>('open_builtin_browser'),
+  listLibraryFiles: () => tauriApi.invoke<LibraryFile[]>('list_library_files'),
+  openLibraryFile: (path: string) => tauriApi.invoke<void>('open_library_file', { path }),
+  openLibraryFolder: (path: string) => tauriApi.invoke<void>('open_library_folder', { path }),
+  deleteLibraryFile: (path: string) => tauriApi.invoke<void>('delete_library_file', { path }),
+  openBuiltinBrowser: (url?: string) => tauriApi.invoke<void>('open_builtin_browser', { url }),
+  navigateBuiltinBrowser: (url: string) => tauriApi.invoke<void>('navigate_builtin_browser', { url }),
+  reloadBuiltinBrowser: () => tauriApi.invoke<void>('reload_builtin_browser'),
+  closeBuiltinBrowser: () => tauriApi.invoke<void>('close_builtin_browser'),
+  listSubscriptions: () => tauriApi.invoke<Subscription[]>('list_subscriptions'),
+  addSubscription: (url: string) => tauriApi.invoke<Subscription>('add_subscription', { url }),
+  checkSubscription: (id: string) => tauriApi.invoke<SubscriptionCheckResult>('check_subscription', { id }),
+  deleteSubscription: (id: string) => tauriApi.invoke<void>('delete_subscription', { id }),
   checkBuiltinCookies: (url: string) => tauriApi.invoke<number>('check_builtin_cookies', { url }),
   onTasksChanged: (cb: (tasks: DownloadTask[]) => void): (() => void) => {
     let un: (() => void) | null = null
@@ -112,8 +158,11 @@ const tauriApi = {
   onSnifferFound: (cb: (media: SniffedMedia) => void): (() => void) => {
     let un: (() => void) | null = null
     tauriApi.listen<any>('sniffer:found', (p) => cb({
-      id: p.id, url: p.url,
-      type: (p.media_type ?? 'unknown') as SniffedMedia['type'],
+      id: p.id,
+      url: p.url,
+      type: (p.media_type ?? p.mediaType ?? 'unknown') as SniffedMedia['type'],
+      title: p.title,
+      pageUrl: p.page_url ?? p.pageUrl,
       timestamp: p.timestamp,
     })).then((fn) => { un = fn })
     return () => { un?.() }

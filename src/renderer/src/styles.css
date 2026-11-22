@@ -1575,6 +1575,115 @@ p {
   border-left-color: var(--status-failed);
 }
 
+/* ================= library, capture & subscriptions ================= */
+.file-icon {
+  width: 48px;
+  height: 48px;
+  flex: 0 0 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-lg);
+  background: var(--brand-soft);
+  color: var(--brand-primary);
+}
+
+.file-path,
+.media-url {
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
+.confirm-path {
+  margin-top: 10px;
+  color: var(--text-muted);
+  font-size: 11px;
+  word-break: break-all;
+  user-select: text;
+}
+
+.capture-controls,
+.subscription-add {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+}
+
+.capture-controls .url-input,
+.subscription-add .url-input {
+  height: 44px;
+}
+
+.capture-summary,
+.subscription-toolbar {
+  margin-top: 20px;
+}
+
+.subscription-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.subscription-card {
+  padding: 18px;
+}
+
+.subscription-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.subscription-heading {
+  flex: 1;
+  min-width: 0;
+}
+
+.subscription-heading h2 {
+  font-size: 15px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subscription-url {
+  display: block;
+  margin-top: 6px;
+  color: var(--brand-primary);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-decoration: none;
+  user-select: text;
+}
+
+.subscription-entries {
+  margin-top: 16px;
+}
+
+.subscription-entry {
+  background: var(--surface-panel);
+  box-shadow: none;
+}
+
+.empty-state.compact {
+  padding: 24px 16px 8px;
+}
+
+.empty-state.compact p {
+  margin-bottom: 0;
+}
+
 /* ================= scrollbar ================= */
 ::-webkit-scrollbar {
   width: 9px;

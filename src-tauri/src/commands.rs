@@ -1,7 +1,10 @@
+use crate::browser::SnifferState;
 use crate::store::{AppStore, DownloadTask, Settings, TaskStatus};
 use crate::ytdlp::{self, FormatOption, MediaInfo, ParseResult, ytdlp_path};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::process::Command;
@@ -13,6 +16,25 @@ use uuid::Uuid;
 pub struct AppInfo {
     pub version: String,
     pub ytdlp: String,
+}
+
+fn current_save_dir(state: &State<'_, Mutex<AppStore>>) -> Result<PathBuf, String> {
+    let s = state.inner().lock().map_err(|e| e.to_string())?;
+    Ok(PathBuf::from(&s.data.settings.save_dir))
+}
+
+fn open_with_system(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let mut command = std::process::Command::new("explorer");
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(target_os = "linux")]
+    let mut command = std::process::Command::new("xdg-open");
+    command
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("打开 {} 失败：{e}", path.display()))
 }
 
 fn get_ytdlp_ver() -> String {
@@ -81,6 +103,23 @@ pub async fn parse_media(state: State<'_, Mutex<AppStore>>, url: String) -> Resu
         s.data.settings.clone()
     };
 
+    if ytdlp::is_hongguo_url(&url) {
+        return Ok(match ytdlp::resolve_hongguo(&url, &settings.proxy).await {
+            Ok(media) => ParseResult {
+                ok: true,
+                info: Some(media.info),
+                message: None,
+                detail: None,
+            },
+            Err(e) => ParseResult {
+                ok: false,
+                info: None,
+                message: Some("红果视频解析失败，请确认链接有效或稍后重试。".into()),
+                detail: Some(e),
+            },
+        });
+    }
+
     let mut args: Vec<String> = vec![
         "-J".into(), "--no-playlist".into(), "--no-warnings".into(),
         "--socket-timeout".into(), "20".into(),
@@ -118,7 +157,7 @@ pub async fn parse_media(state: State<'_, Mutex<AppStore>>, url: String) -> Resu
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    Ok(match parse_json(&stdout) {
+    Ok(match parse_json(&stdout, &url) {
         Ok(info) => ParseResult { ok: true, info: Some(info), message: None, detail: None },
         Err(e) => ParseResult {
             ok: false, info: None,
@@ -148,13 +187,14 @@ fn humanize_err(detail: &str) -> String {
     "任务失败，展开详情可查看原始错误信息。".into()
 }
 
-fn parse_json(raw: &str) -> Result<MediaInfo, String> {
+fn parse_json(raw: &str, source_url: &str) -> Result<MediaInfo, String> {
     #[derive(serde::Deserialize)]
     struct F { height: Option<u16>, vcodec: Option<String> }
     #[derive(serde::Deserialize)]
     struct R {
         id: Option<String>, title: Option<String>, thumbnail: Option<String>,
         duration: Option<f64>, uploader: Option<String>,
+        webpage_url: Option<String>, original_url: Option<String>,
         extractor_key: Option<String>, extractor: Option<String>,
         formats: Option<Vec<F>>,
     }
@@ -192,6 +232,10 @@ fn parse_json(raw: &str) -> Result<MediaInfo, String> {
 
     Ok(MediaInfo {
         id: r.id.unwrap_or_default(),
+        url: r
+            .webpage_url
+            .or(r.original_url)
+            .unwrap_or_else(|| source_url.to_string()),
         title: r.title.unwrap_or_else(|| "视频".into()),
         thumbnail: r.thumbnail, duration: r.duration, uploader: r.uploader,
         site: r.extractor_key.or(r.extractor), formats: out,
@@ -254,11 +298,39 @@ pub async fn start_download(
             return;
         }
 
-        let args = ytdlp::build_download_args(
-            &task_clone.url, &task_clone.selector, &task_clone.save_dir,
+        let is_hongguo = ytdlp::is_hongguo_url(&task_clone.url);
+        let mut download_url = task_clone.url.clone();
+        if is_hongguo {
+            match ytdlp::resolve_hongguo(&task_clone.url, &settings.proxy).await {
+                Ok(media) => download_url = media.play_url,
+                Err(e) => {
+                    let mut s = state.inner().lock().unwrap();
+                    if let Some(t) = s.data.tasks.iter_mut().find(|t| t.id == id2) {
+                        t.status = TaskStatus::Failed;
+                        t.error = Some("红果视频地址获取失败，请重新解析后再下载。".into());
+                        t.error_detail = Some(e);
+                    }
+                    s.save();
+                    let _ = app2.emit("tasks:changed", s.data.tasks.clone());
+                    return;
+                }
+            }
+        }
+        let mut args = ytdlp::build_download_args(
+            &download_url, &task_clone.selector, &task_clone.save_dir,
             &settings.proxy, &settings.cookies_from_browser,
             task_clone.audio_format.as_deref(), task_clone.height,
         );
+        if is_hongguo {
+            let mut with_headers = vec![
+                "--user-agent".into(),
+                ytdlp::HONGGUO_USER_AGENT.into(),
+                "--add-header".into(),
+                format!("Referer:{}", ytdlp::HONGGUO_REFERER),
+            ];
+            with_headers.extend(args);
+            args = with_headers;
+        }
         let child = match Command::new(ytdlp_path()).args(&args).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
             Ok(c) => c,
             Err(e) => {
@@ -419,27 +491,195 @@ pub async fn read_clipboard() -> Result<String, String> {
 }
 
 #[tauri::command]
-pub async fn open_builtin_browser(_app: AppHandle) -> Result<(), String> {
-    // Stub — 需要解决 WebviewUrl 类型问题
-    Ok(())
+pub async fn list_library_files(
+    state: State<'_, Mutex<AppStore>>,
+) -> Result<Vec<crate::library::LibraryFile>, String> {
+    let dir = current_save_dir(&state)?;
+    tauri::async_runtime::spawn_blocking(move || crate::library::scan_library(&dir))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub async fn check_builtin_cookies() -> Result<u32, String> { Ok(0) }
+pub async fn open_library_file(
+    state: State<'_, Mutex<AppStore>>,
+    path: String,
+) -> Result<(), String> {
+    let dir = current_save_dir(&state)?;
+    let path = crate::library::validate_library_file(&dir, Path::new(&path))?;
+    open_with_system(&path)
+}
 
 #[tauri::command]
-pub async fn sniffer_report(app: AppHandle, url: String) -> Result<(), String> {
-    let t = if url.ends_with(".m3u8") { "hls" }
-        else if url.ends_with(".mpd") { "dash" }
-        else if url.ends_with(".mp4") { "mp4" }
-        else if url.ends_with(".webm") { "webm" }
-        else if url.ends_with(".m4a") { "m4a" }
-        else if url.ends_with(".mp3") { "mp3" }
-        else { "unknown" };
-    let media = serde_json::json!({
-        "id": format!("{}-{}", now_ms(), url.chars().last().unwrap_or('x')),
-        "url": url, "media_type": t, "timestamp": now_ms(),
-    });
-    let _ = app.emit("sniffer:found", media);
-    Ok(())
+pub async fn open_library_folder(
+    state: State<'_, Mutex<AppStore>>,
+    path: String,
+) -> Result<(), String> {
+    let dir = current_save_dir(&state)?;
+    let path = crate::library::validate_library_file(&dir, Path::new(&path))?;
+    let folder = path
+        .parent()
+        .ok_or_else(|| "找不到文件所在目录。".to_string())?;
+    open_with_system(folder)
+}
+
+#[tauri::command]
+pub async fn delete_library_file(
+    state: State<'_, Mutex<AppStore>>,
+    path: String,
+) -> Result<(), String> {
+    let dir = current_save_dir(&state)?;
+    crate::library::delete_library_file(&dir, Path::new(&path))
+}
+
+#[tauri::command]
+pub async fn list_subscriptions(
+    state: State<'_, Mutex<AppStore>>,
+) -> Result<Vec<crate::subscriptions::Subscription>, String> {
+    let s = state.inner().lock().map_err(|e| e.to_string())?;
+    Ok(s.data.subscriptions.clone())
+}
+
+#[tauri::command]
+pub async fn add_subscription(
+    state: State<'_, Mutex<AppStore>>,
+    url: String,
+) -> Result<crate::subscriptions::Subscription, String> {
+    let mut s = state.inner().lock().map_err(|e| e.to_string())?;
+    let subscription = crate::subscriptions::add(&mut s.data.subscriptions, &url, now_ms())?;
+    s.save_result()?;
+    Ok(subscription)
+}
+
+#[tauri::command]
+pub async fn check_subscription(
+    state: State<'_, Mutex<AppStore>>,
+    checks: State<'_, Mutex<HashSet<String>>>,
+    id: String,
+) -> Result<crate::subscriptions::SubscriptionCheckResult, String> {
+    {
+        let mut active = checks.inner().lock().map_err(|e| e.to_string())?;
+        if !active.insert(id.clone()) {
+            return Err("这个订阅正在检查更新，请稍候。".into());
+        }
+    }
+
+    let result = async {
+        let (subscription, settings) = {
+            let s = state.inner().lock().map_err(|e| e.to_string())?;
+            let subscription = s
+                .data
+                .subscriptions
+                .iter()
+                .find(|item| item.id == id)
+                .cloned()
+                .ok_or_else(|| "订阅不存在或已删除。".to_string())?;
+            (subscription, s.data.settings.clone())
+        };
+        let url = subscription.url.clone();
+        let fetched = tauri::async_runtime::spawn_blocking(move || {
+            crate::subscriptions::fetch_flat_playlist(
+                &url,
+                &settings.proxy,
+                &settings.cookies_from_browser,
+            )
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+
+        let mut s = state.inner().lock().map_err(|e| e.to_string())?;
+        let index = s
+            .data
+            .subscriptions
+            .iter()
+            .position(|item| item.id == id)
+            .ok_or_else(|| "订阅不存在或已删除。".to_string())?;
+        let result = crate::subscriptions::merge_entries(&s.data.subscriptions[index], fetched);
+        s.data.subscriptions[index] = result.subscription.clone();
+        s.save_result()?;
+        Ok(result)
+    }
+    .await;
+
+    checks
+        .inner()
+        .lock()
+        .map_err(|e| e.to_string())?
+        .remove(&id);
+    result
+}
+
+#[tauri::command]
+pub async fn delete_subscription(
+    state: State<'_, Mutex<AppStore>>,
+    id: String,
+) -> Result<(), String> {
+    let mut s = state.inner().lock().map_err(|e| e.to_string())?;
+    let old_len = s.data.subscriptions.len();
+    s.data.subscriptions.retain(|item| item.id != id);
+    if s.data.subscriptions.len() == old_len {
+        return Err("订阅不存在或已删除。".into());
+    }
+    s.save_result()
+}
+
+#[tauri::command]
+pub async fn open_builtin_browser(app: AppHandle, url: Option<String>) -> Result<(), String> {
+    crate::browser::open_or_focus(&app, url.as_deref())
+}
+
+#[tauri::command]
+pub async fn navigate_builtin_browser(app: AppHandle, url: String) -> Result<(), String> {
+    crate::browser::navigate(&app, &url)
+}
+
+#[tauri::command]
+pub async fn reload_builtin_browser(app: AppHandle) -> Result<(), String> {
+    crate::browser::reload(&app)
+}
+
+#[tauri::command]
+pub async fn close_builtin_browser(app: AppHandle) -> Result<(), String> {
+    crate::browser::close(&app)
+}
+
+#[tauri::command]
+pub async fn check_builtin_cookies(app: AppHandle, url: String) -> Result<u32, String> {
+    crate::browser::cookie_count(&app, &url)
+}
+
+#[tauri::command]
+pub async fn sniffer_report(
+    window: tauri::WebviewWindow,
+    state: State<'_, Mutex<SnifferState>>,
+    url: String,
+    page_url: String,
+    title: String,
+) -> Result<(), String> {
+    crate::browser::report(&window, state.inner(), url, page_url, title)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_json;
+
+    #[test]
+    fn parsed_media_always_keeps_a_download_url() {
+        let webpage = parse_json(
+            r#"{"webpage_url":"https://example.com/watch","original_url":"https://example.com/original","formats":[]}"#,
+            "https://example.com/input",
+        )
+        .unwrap();
+        assert_eq!(webpage.url, "https://example.com/watch");
+
+        let original = parse_json(
+            r#"{"original_url":"https://example.com/original","formats":[]}"#,
+            "https://example.com/input",
+        )
+        .unwrap();
+        assert_eq!(original.url, "https://example.com/original");
+
+        let source = parse_json(r#"{"formats":[]}"#, "https://example.com/input").unwrap();
+        assert_eq!(source.url, "https://example.com/input");
+    }
 }

@@ -9,6 +9,7 @@
     "fs:default",
     "shell:default",
     "notification:default",
-    "clipboard-manager:default"
+    "clipboard-manager:default",
+    "allow-main-commands"
   ]
 }

@@ -1,6 +1,9 @@
 #![recursion_limit = "256"]
+mod browser;
 mod commands;
+mod library;
 mod store;
+mod subscriptions;
 mod ytdlp;
 
 use std::sync::Mutex;
@@ -33,11 +36,24 @@ pub fn run() -> tauri::Result<()> {
             commands::set_settings,
             commands::get_app_info,
             commands::read_clipboard,
+            commands::list_library_files,
+            commands::open_library_file,
+            commands::open_library_folder,
+            commands::delete_library_file,
+            commands::list_subscriptions,
+            commands::add_subscription,
+            commands::check_subscription,
+            commands::delete_subscription,
             commands::open_builtin_browser,
+            commands::navigate_builtin_browser,
+            commands::reload_builtin_browser,
+            commands::close_builtin_browser,
             commands::check_builtin_cookies,
             commands::sniffer_report,
         ])
         // 与 commands.rs 中 State<'_, Mutex<AppStore>> 的类型保持一致
         .manage(Mutex::new(store))
+        .manage(Mutex::new(std::collections::HashSet::<String>::new()))
+        .manage(Mutex::new(browser::SnifferState::default()))
         .run(tauri::generate_context!())
 }

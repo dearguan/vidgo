@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactElement, type ReactNode } from 'react'
-import type { AppInfo, DownloadTask, Settings } from '../../shared/types'
+import type { AppInfo, DownloadTask, Settings, SniffedMedia } from '../../shared/types'
 import type { View } from './utils'
 import { api } from './api'
 
@@ -19,7 +19,12 @@ interface AppContextValue {
   appInfo: AppInfo | null
   updateSettings: (patch: Partial<Settings>, silent?: boolean) => Promise<void>
   chooseDir: () => Promise<void>
-  openBuiltinBrowser: () => Promise<void>
+  sniffedMedia: SniffedMedia[]
+  clearSniffedMedia: () => void
+  parseRequest: { url: string; token: number } | null
+  requestParse: (url: string) => void
+  clearParseRequest: () => void
+  openBuiltinBrowser: (url?: string) => Promise<void>
   checkBuiltinCookies: (url: string) => Promise<number>
   taskAction: (action: TaskAction, id: string, deleteFile?: boolean) => void
   notify: (text: string, type?: 'ok' | 'err') => void
@@ -39,8 +44,11 @@ export function AppProvider({ children }: { children: ReactNode }): ReactElement
   const [tasks, setTasks] = useState<DownloadTask[]>([])
   const [settings, setSettings] = useState<Settings | null>(null)
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null)
+  const [sniffedMedia, setSniffedMedia] = useState<SniffedMedia[]>([])
+  const [parseRequest, setParseRequest] = useState<{ url: string; token: number } | null>(null)
   const [toasts, setToasts] = useState<Toast[]>([])
   const toastId = useRef(0)
+  const parseToken = useRef(0)
   const statusRef = useRef<Record<string, DownloadTask['status']>>({})
 
   const notify = useCallback((text: string, type: 'ok' | 'err' = 'ok') => {
@@ -70,11 +78,19 @@ export function AppProvider({ children }: { children: ReactNode }): ReactElement
     api.getSettings().then(setSettings)
     api.getAppInfo().then(setAppInfo)
     api.getTasks().then(applyTasks)
-    api.onSnifferFound((media) => {
+    const offSniffer = api.onSnifferFound((media) => {
+      setSniffedMedia((list) => [
+        media,
+        ...list.filter((item) => item.url !== media.url || item.type !== media.type)
+      ].slice(0, 200))
       const url = media.url.length > 60 ? media.url.slice(0, 60) + '…' : media.url
-      notify(`📺 发现${media.type.toUpperCase()}视频：${url}`, 'ok')
+      notify(`发现${media.type.toUpperCase()}媒体：${url}`, 'ok')
     })
-    return api.onTasksChanged(applyTasks)
+    const offTasks = api.onTasksChanged(applyTasks)
+    return () => {
+      offSniffer()
+      offTasks()
+    }
   }, [applyTasks, notify])
 
   useEffect(() => {
@@ -103,8 +119,17 @@ export function AppProvider({ children }: { children: ReactNode }): ReactElement
     if (dir) await updateSettings({ saveDir: dir }, true)
   }, [updateSettings])
 
-  const openBuiltinBrowser = useCallback(async () => {
-    await api.openBuiltinBrowser()
+  const clearSniffedMedia = useCallback(() => setSniffedMedia([]), [])
+
+  const requestParse = useCallback((url: string) => {
+    setParseRequest({ url, token: ++parseToken.current })
+    setView('home')
+  }, [])
+
+  const clearParseRequest = useCallback(() => setParseRequest(null), [])
+
+  const openBuiltinBrowser = useCallback(async (url?: string) => {
+    await api.openBuiltinBrowser(url)
   }, [])
 
   const checkBuiltinCookies = useCallback(async (url: string) => {
@@ -126,7 +151,25 @@ export function AppProvider({ children }: { children: ReactNode }): ReactElement
 
   return (
     <AppContext.Provider
-      value={{ view, setView, tasks, settings, appInfo, updateSettings, chooseDir, openBuiltinBrowser, checkBuiltinCookies, taskAction, notify, toasts }}
+      value={{
+        view,
+        setView,
+        tasks,
+        settings,
+        appInfo,
+        updateSettings,
+        chooseDir,
+        sniffedMedia,
+        clearSniffedMedia,
+        parseRequest,
+        requestParse,
+        clearParseRequest,
+        openBuiltinBrowser,
+        checkBuiltinCookies,
+        taskAction,
+        notify,
+        toasts
+      }}
     >
       {children}
     </AppContext.Provider>

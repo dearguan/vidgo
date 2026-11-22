@@ -24,13 +24,20 @@ pub struct Settings {
 
 fn default_save_dir() -> String {
     if let Some(home) = dirs::home_dir() {
-        home.join("Downloads").join("Vidgo").to_string_lossy().to_string()
+        home.join("Downloads")
+            .join("Vidgo")
+            .to_string_lossy()
+            .to_string()
     } else {
         "Downloads/Vidgo".into()
     }
 }
-fn default_theme() -> ThemeMode { "system".into() }
-fn default_true() -> bool { true }
+fn default_theme() -> ThemeMode {
+    "system".into()
+}
+fn default_true() -> bool {
+    true
+}
 
 impl Default for Settings {
     fn default() -> Self {
@@ -93,6 +100,8 @@ pub struct StoreData {
     pub settings: Settings,
     #[serde(default)]
     pub tasks: Vec<DownloadTask>,
+    #[serde(default)]
+    pub subscriptions: Vec<crate::subscriptions::Subscription>,
 }
 
 pub struct AppStore {
@@ -116,17 +125,53 @@ impl AppStore {
             .unwrap_or_else(|| StoreData {
                 settings: Settings::default(),
                 tasks: vec![],
+                subscriptions: vec![],
             });
         Self { data, path }
     }
 
-    pub fn save(&self) {
+    pub fn save_result(&self) -> Result<(), String> {
         if let Some(parent) = self.path.parent() {
-            let _ = fs::create_dir_all(parent);
+            fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败：{e}"))?;
         }
-        let _ = fs::write(
-            &self.path,
-            serde_json::to_string_pretty(&self.data).unwrap_or_default(),
+        let json =
+            serde_json::to_string_pretty(&self.data).map_err(|e| format!("序列化配置失败：{e}"))?;
+        fs::write(&self.path, json).map_err(|e| format!("保存配置失败：{e}"))
+    }
+
+    pub fn save(&self) {
+        let _ = self.save_result();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_store_without_subscriptions_deserializes_with_empty_list() {
+        let data: StoreData = serde_json::from_str(
+            r#"{
+                "settings": {
+                    "saveDir": "/tmp/vidgo",
+                    "concurrency": 3,
+                    "proxy": "",
+                    "theme": "system",
+                    "clipboardWatch": true,
+                    "cookieBrowser": ""
+                },
+                "tasks": []
+            }"#,
+        )
+        .unwrap();
+        assert!(data.subscriptions.is_empty());
+        assert!(data.tasks.is_empty());
+        assert_eq!(data.settings.save_dir, "/tmp/vidgo");
+
+        let serialized = serde_json::to_value(&data).unwrap();
+        assert_eq!(
+            serialized.get("subscriptions").and_then(|v| v.as_array()),
+            Some(&Vec::new())
         );
     }
 }

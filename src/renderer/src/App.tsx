@@ -7,6 +7,9 @@ import { HomePage } from './pages/HomePage'
 import { DownloadingPage } from './pages/DownloadingPage'
 import { CompletedPage } from './pages/CompletedPage'
 import { FailedPage } from './pages/FailedPage'
+import { LibraryPage } from './pages/LibraryPage'
+import { CapturePage } from './pages/CapturePage'
+import { SubscriptionsPage } from './pages/SubscriptionsPage'
 import { SettingsPage } from './pages/SettingsPage'
 
 const PAGE_TITLE: Record<View, { title: string; sub?: string }> = {
@@ -14,6 +17,9 @@ const PAGE_TITLE: Record<View, { title: string; sub?: string }> = {
   downloading: { title: '正在下载' },
   completed: { title: '已完成' },
   failed: { title: '失败任务' },
+  library: { title: '视频库', sub: '浏览和管理已下载的媒体文件' },
+  capture: { title: '网页捕获', sub: '在内置浏览器中发现网页媒体' },
+  subscriptions: { title: '订阅', sub: '跟踪收藏页面的最新内容' },
   settings: { title: '设置' }
 }
 
@@ -25,7 +31,7 @@ function Shell(): ReactElement {
 
   const groups: Array<{
     label: string
-    items: Array<{ id?: View; label: string; icon: string; count?: number; soon?: boolean }>
+    items: Array<{ id: View; label: string; icon: string; count?: number }>
   }> = [
     {
       label: '下载',
@@ -39,13 +45,13 @@ function Shell(): ReactElement {
     {
       label: '媒体',
       items: [
-        { label: '视频库', icon: 'library', soon: true },
-        { label: '网页捕获', icon: 'globe', soon: true }
+        { id: 'library', label: '视频库', icon: 'library' },
+        { id: 'capture', label: '网页捕获', icon: 'globe' }
       ]
     },
     {
       label: '其他',
-      items: [{ label: '订阅', icon: 'rss', soon: true }]
+      items: [{ id: 'subscriptions', label: '订阅', icon: 'rss' }]
     }
   ]
 
@@ -63,25 +69,17 @@ function Shell(): ReactElement {
           {groups.map((g) => (
             <div className="nav-group" key={g.label}>
               <div className="nav-group-label">{g.label}</div>
-              {g.items.map((item) =>
-                item.soon ? (
-                  <button key={item.label} className="nav-item disabled" disabled title="后续版本提供">
-                    <Icon name={item.icon} size={20} />
-                    <span>{item.label}</span>
-                    <span className="nav-soon">P2</span>
-                  </button>
-                ) : (
-                  <button
-                    key={item.id}
-                    className={`nav-item ${view === item.id ? 'active' : ''}`}
-                    onClick={() => item.id && setView(item.id)}
-                  >
-                    <Icon name={item.icon} size={20} />
-                    <span>{item.label}</span>
-                    {item.count ? <span className="nav-count">{item.count}</span> : null}
-                  </button>
-                )
-              )}
+              {g.items.map((item) => (
+                <button
+                  key={item.id}
+                  className={`nav-item ${view === item.id ? 'active' : ''}`}
+                  onClick={() => setView(item.id)}
+                >
+                  <Icon name={item.icon} size={20} />
+                  <span>{item.label}</span>
+                  {item.count ? <span className="nav-count">{item.count}</span> : null}
+                </button>
+              ))}
             </div>
           ))}
         </nav>
@@ -107,6 +105,11 @@ function Shell(): ReactElement {
           {view === 'downloading' && <DownloadingPage />}
           {view === 'completed' && <CompletedPage />}
           {view === 'failed' && <FailedPage />}
+          {view === 'library' && <LibraryPage />}
+          {view === 'capture' && <CapturePage />}
+          <div hidden={view !== 'subscriptions'}>
+            <SubscriptionsPage />
+          </div>
           {view === 'settings' && <SettingsPage />}
         </main>
 

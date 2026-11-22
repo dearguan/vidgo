@@ -46,7 +46,7 @@ function Row({ label, hint, children }: { label: string; hint?: string; children
 }
 
 export function SettingsPage(): ReactElement {
-  const { settings, appInfo, updateSettings, chooseDir, openBuiltinBrowser } = useApp()
+  const { settings, appInfo, updateSettings, chooseDir, openBuiltinBrowser, notify } = useApp()
   const [proxy, setProxy] = useState('')
 
   useEffect(() => {
@@ -126,9 +126,14 @@ export function SettingsPage(): ReactElement {
       <Group title="登录与 Cookie" onReset={() => patch({ cookieBrowser: 'auto' })}>
         <Row
           label="内置浏览器"
-          hint="最省心的方式：点击按钮打开内置浏览器，登录抖音、B站、YouTube 等视频站，Vidgo 自动复用登录态。登录一次，下次打开还在。"
+          hint="在内置浏览器中登录视频站后，网页捕获会保留登录状态。内置浏览器 Cookie 不保证自动传给 yt-dlp；如下载需要登录，请同时配置下方系统浏览器 Cookie。"
         >
-          <button className="btn primary" onClick={() => void openBuiltinBrowser()}>
+          <button
+            className="btn primary"
+            onClick={() => {
+              void openBuiltinBrowser().catch((e) => notify(e instanceof Error ? e.message : String(e), 'err'))
+            }}
+          >
             打开内置浏览器登录
           </button>
         </Row>
