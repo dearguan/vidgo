@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } 
 import type { FormatOption, MediaInfo } from '../../../shared/types'
 import { Icon, Logo } from '../Icon'
 import { useApp } from '../state'
+import { api } from '../api'
 import { formatBytes, formatDuration, isHttpUrl } from '../utils'
 import { Thumb } from '../components/TaskCard'
 
@@ -40,7 +41,7 @@ export function HomePage(): ReactElement {
     if (!settings?.clipboardWatch) return
     let timer: number | undefined
     const check = async (): Promise<void> => {
-      const text = (await window.api.readClipboard()).trim()
+      const text = (await api.readClipboard()).trim()
       if (isHttpUrl(text)) {
         setClipHint(text)
         window.clearTimeout(timer)
@@ -67,7 +68,7 @@ export function HomePage(): ReactElement {
     setMedia(null)
     setParseError(null)
     setShowDetail(false)
-    const result = await window.api.parse(target)
+    const result = await api.parse(target)
     if (id !== seq.current) return
     setParsing(false)
     if (result.ok) {
@@ -82,12 +83,12 @@ export function HomePage(): ReactElement {
 
   const cancelParse = (): void => {
     seq.current++
-    void window.api.cancelParse()
+    void api.cancelParse()
     setParsing(false)
   }
 
   const paste = async (): Promise<void> => {
-    const text = (await window.api.readClipboard()).trim()
+    const text = (await api.readClipboard()).trim()
     if (!text) {
       notify('剪贴板里没有可用的链接', 'err')
       return
@@ -106,7 +107,7 @@ export function HomePage(): ReactElement {
   const startDownload = async (): Promise<void> => {
     if (!media || !selected || !settings) return
     try {
-      await window.api.startDownload({
+      await api.startDownload({
         url: media.url,
         title: media.title,
         thumbnail: media.thumbnail,

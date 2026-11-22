@@ -1,25 +1,15 @@
 #![recursion_limit = "256"]
-// Prevents additional console window on Windows in release
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-
 mod commands;
 mod store;
 mod ytdlp;
 
 use std::sync::Mutex;
 
-pub struct AppState {
-    pub store: Mutex<store::AppStore>,
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
+pub fn run() -> tauri::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let store = store::AppStore::load();
-    let state = AppState {
-        store: Mutex::new(store),
-    };
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -47,7 +37,7 @@ pub fn run() {
             commands::check_builtin_cookies,
             commands::sniffer_report,
         ])
-        .manage(state)
+        // 与 commands.rs 中 State<'_, Mutex<AppStore>> 的类型保持一致
+        .manage(Mutex::new(store))
         .run(tauri::generate_context!())
-        .expect("error while running tauri application");
 }

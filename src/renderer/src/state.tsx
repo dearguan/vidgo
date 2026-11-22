@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactElement, type ReactNode } from 'react'
 import type { AppInfo, DownloadTask, Settings } from '../../shared/types'
 import type { View } from './utils'
+import { api } from './api'
 
 export type TaskAction = 'pause' | 'resume' | 'cancel' | 'remove' | 'openFolder' | 'openFile' | 'redownload'
 
@@ -66,14 +67,14 @@ export function AppProvider({ children }: { children: ReactNode }): ReactElement
   )
 
   useEffect(() => {
-    window.api.getSettings().then(setSettings)
-    window.api.getAppInfo().then(setAppInfo)
-    window.api.getTasks().then(applyTasks)
-    window.api.onSnifferFound((media) => {
+    api.getSettings().then(setSettings)
+    api.getAppInfo().then(setAppInfo)
+    api.getTasks().then(applyTasks)
+    api.onSnifferFound((media) => {
       const url = media.url.length > 60 ? media.url.slice(0, 60) + '…' : media.url
       notify(`📺 发现${media.type.toUpperCase()}视频：${url}`, 'ok')
     })
-    return window.api.onTasksChanged(applyTasks)
+    return api.onTasksChanged(applyTasks)
   }, [applyTasks, notify])
 
   useEffect(() => {
@@ -90,7 +91,7 @@ export function AppProvider({ children }: { children: ReactNode }): ReactElement
 
   const updateSettings = useCallback(
     async (patch: Partial<Settings>, silent = false) => {
-      const next = await window.api.setSettings(patch)
+      const next = await api.setSettings(patch)
       setSettings(next)
       if (!silent) notify('设置已保存')
     },
@@ -98,27 +99,27 @@ export function AppProvider({ children }: { children: ReactNode }): ReactElement
   )
 
   const chooseDir = useCallback(async () => {
-    const dir = await window.api.chooseDir()
+    const dir = await api.chooseDir()
     if (dir) await updateSettings({ saveDir: dir }, true)
   }, [updateSettings])
 
   const openBuiltinBrowser = useCallback(async () => {
-    await window.api.openBuiltinBrowser()
+    await api.openBuiltinBrowser()
   }, [])
 
   const checkBuiltinCookies = useCallback(async (url: string) => {
-    return window.api.checkBuiltinCookies(url)
+    return api.checkBuiltinCookies(url)
   }, [])
 
   const taskAction = useCallback((action: TaskAction, id: string, deleteFile = false) => {
     const map: Record<TaskAction, (id: string) => Promise<void>> = {
-      pause: window.api.pauseTask,
-      resume: window.api.resumeTask,
-      cancel: window.api.cancelTask,
-      remove: (tid) => window.api.removeTask(tid, deleteFile),
-      openFolder: window.api.openFolder,
-      openFile: window.api.openFile,
-      redownload: window.api.redownloadTask
+      pause: api.pauseTask,
+      resume: api.resumeTask,
+      cancel: api.cancelTask,
+      remove: (tid) => api.removeTask(tid, deleteFile),
+      openFolder: api.openFolder,
+      openFile: api.openFile,
+      redownload: api.redownloadTask
     }
     void map[action](id)
   }, [])

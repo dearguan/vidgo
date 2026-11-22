@@ -1,6 +1,7 @@
 import { useState, type ReactElement } from 'react'
 import { Icon } from '../Icon'
 import { useApp } from '../state'
+import { api } from '../api'
 import { formatBytes } from '../utils'
 import { TaskCard, Thumb } from '../components/TaskCard'
 import { ConfirmModal } from '../components/Modal'
@@ -24,7 +25,7 @@ export function CompletedPage(): ReactElement {
               <Icon name="list" size={16} />
             </button>
           </div>
-          <button className="btn secondary small" onClick={() => void window.api.openSaveDir()}>
+          <button className="btn secondary small" onClick={() => void api.openSaveDir()}>
             <Icon name="folder" size={15} />
             打开下载目录
           </button>
@@ -41,7 +42,7 @@ export function CompletedPage(): ReactElement {
           <Icon name="checkCircle" size={48} />
           <h2>还没有下载完成的文件</h2>
           <p>下载完成的视频会显示在这里。</p>
-          <button className="btn primary" onClick={() => void window.api.openSaveDir()}>
+          <button className="btn primary" onClick={() => void api.openSaveDir()}>
             打开下载目录
           </button>
         </div>
