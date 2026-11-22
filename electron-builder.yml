@@ -1,0 +1,29 @@
+appId: com.vidgo.app
+productName: Vidgo
+copyright: Copyright © 2026 Vidgo
+directories:
+  output: dist
+  buildResources: build
+files:
+  - out/**/*
+  - package.json
+extraResources:
+  - from: resources/bin/win32-x64
+    to: bin/win32-x64
+    filter:
+      - '**/*'
+asar: true
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: ${productName}-${version}-Setup.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Vidgo
+  deleteAppDataOnUninstall: false

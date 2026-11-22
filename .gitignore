@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+out/
+build/
+
+# Tauri
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# IDE
+.idea/
+.vscode/
+.DS_Store
+*.log
+
+# OS
+Thumbs.db
+
+# Env
+.env
+.env.local
+
+# 大二进制（yt-dlp.exe, ffmpeg.exe 由 CI 下载，不放 git）
+src-tauri/resources/bin/
+resources/bin/

@@ -1,0 +1,64 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Vidgo",
+  "version": "0.4.0",
+  "identifier": "com.vidgo.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../out/renderer"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Vidgo — 视频下载器",
+        "url": "index.html",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 980,
+        "minHeight": 640,
+        "resizable": true,
+        "center": true,
+        "dragDropEnabled": true,
+        "decorations": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "Video",
+    "shortDescription": "视频下载器",
+    "longDescription": "下载 YouTube、抖音、B站等 1000+ 平台视频，支持 MP4/MP3/仅音频。",
+    "copyright": "Vidgo",
+    "windows": {
+      "nsis": {
+      "languages": ["SimpChinese"]
+    },
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    }
+  },
+  "plugins": {
+    "dialog": {},
+    "shell": {},
+    "fs": {},
+    "clipboard-manager": {},
+    "global-shortcut": {},
+    "notification": {}
+  }
+}
