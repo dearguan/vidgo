@@ -152,8 +152,11 @@ export interface UpdateInfo {
 }
 
 export interface UpdateProgress {
+  /** downloading | verifying | installing */
+  stage?: string
   downloaded: number
   total: number
+  speed?: number
 }
 
 export interface StartDownloadPayload {
@@ -206,6 +209,7 @@ export interface Api {
   installUpdate?(assetUrl: string, sha256?: string, size?: number): Promise<void>
   openExternal?(url: string): Promise<void>
   onUpdateProgress?(cb: (progress: UpdateProgress) => void): () => void
+  openUpdateLog?(): Promise<void>
   onTasksChanged(cb: (tasks: DownloadTask[]) => void): () => void
   onSnifferFound(cb: (media: SniffedMedia) => void): () => void
   onSnifferEnqueue?(cb: (media: SniffedMedia) => void): () => void

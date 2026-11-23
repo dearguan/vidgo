@@ -35,5 +35,6 @@ commands.allow = [
   "submit_report",
   "check_update",
   "install_update",
+  "open_update_log",
   "open_external_url",
 ]

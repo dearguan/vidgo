@@ -33,6 +33,8 @@ interface AppContextValue {
   checkingUpdate: boolean
   installingUpdate: boolean
   updateProgress: UpdateProgress | null
+  /** 最近一次更新失败的原因，持续显示在设置页 */
+  updateError: string | null
   checkUpdate: (silent?: boolean) => Promise<void>
   installUpdate: () => Promise<void>
   notify: (text: string, type?: 'ok' | 'err') => void
@@ -47,6 +49,20 @@ export function useApp(): AppContextValue {
   return ctx
 }
 
+/** 更新进度的可读文案（下载中 / 校验 / 安装） */
+export function describeUpdateProgress(progress: UpdateProgress | null): string {
+  if (!progress) return '正在准备下载…'
+  if (progress.stage === 'verifying') return '正在校验安装包…'
+  if (progress.stage === 'installing') return '正在安装，应用即将重启…'
+  const mb = (n: number): string => (n / 1024 / 1024).toFixed(1)
+  if (progress.total > 0) {
+    const pct = Math.min(100, Math.round((progress.downloaded / progress.total) * 100))
+    const speed = progress.speed && progress.speed > 0 ? ` · ${mb(progress.speed)} MB/s` : ''
+    return `正在下载 ${pct}% · ${mb(progress.downloaded)}/${mb(progress.total)} MB${speed}`
+  }
+  return `正在下载 ${mb(progress.downloaded)} MB`
+}
+
 export function AppProvider({ children }: { children: ReactNode }): ReactElement {
   const [view, setView] = useState<View>('home')
   const [tasks, setTasks] = useState<DownloadTask[]>([])
@@ -59,6 +75,7 @@ export function AppProvider({ children }: { children: ReactNode }): ReactElement
   const [checkingUpdate, setCheckingUpdate] = useState(false)
   const [installingUpdate, setInstallingUpdate] = useState(false)
   const [updateProgress, setUpdateProgress] = useState<UpdateProgress | null>(null)
+  const [updateError, setUpdateError] = useState<string | null>(null)
   const toastId = useRef(0)
   const parseToken = useRef(0)
   const statusRef = useRef<Record<string, DownloadTask['status']>>({})
@@ -221,11 +238,16 @@ export function AppProvider({ children }: { children: ReactNode }): ReactElement
     }
     setInstallingUpdate(true)
     setUpdateProgress(null)
+    setUpdateError(null)
     notify('开始下载更新…')
     try {
       await api.installUpdate(updateInfo.assetUrl, updateInfo.sha256, updateInfo.assetSize)
+      setUpdateProgress({ stage: 'installing', downloaded: 0, total: 0 })
+      notify('安装程序已启动，应用即将退出并自动重启')
     } catch (e) {
-      notify(e instanceof Error ? e.message : String(e), 'err')
+      const message = e instanceof Error ? e.message : String(e)
+      setUpdateError(message)
+      notify(message, 'err')
     } finally {
       setInstallingUpdate(false)
     }
@@ -260,6 +282,7 @@ export function AppProvider({ children }: { children: ReactNode }): ReactElement
         checkingUpdate,
         installingUpdate,
         updateProgress,
+        updateError,
         checkUpdate,
         installUpdate,
         notify,

@@ -1,5 +1,5 @@
 import { useState, type ReactElement } from 'react'
-import { AppProvider, useApp } from './state'
+import { AppProvider, describeUpdateProgress, useApp } from './state'
 import { Icon, Logo } from './Icon'
 import { ACTIVE_STATUS, type View } from './utils'
 import { QueueBar } from './components/QueueBar'
@@ -116,10 +116,22 @@ function Shell(): ReactElement {
             <Icon name="download" size={16} />
             <span className="update-banner-text">
               发现新版本 v{updateInfo.latest}
-              {installingUpdate && updateProgress && updateProgress.total > 0
-                ? `，正在下载 ${Math.min(100, Math.round((updateProgress.downloaded / updateProgress.total) * 100))}%`
-                : ''}
+              {installingUpdate ? `，${describeUpdateProgress(updateProgress)}` : ''}
             </span>
+            {installingUpdate && (
+              <span className="update-bar" aria-hidden>
+                <span
+                  className="update-bar-fill"
+                  style={{
+                    width: `${
+                      updateProgress && updateProgress.total > 0
+                        ? Math.min(100, (updateProgress.downloaded / updateProgress.total) * 100)
+                        : 10
+                    }%`
+                  }}
+                />
+              </span>
+            )}
             <button className="btn primary small" disabled={installingUpdate} onClick={() => void installUpdate()}>
               {installingUpdate ? '更新中…' : '立即更新'}
             </button>

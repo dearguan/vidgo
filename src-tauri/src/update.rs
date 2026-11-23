@@ -229,19 +229,71 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+fn update_dir() -> PathBuf {
+    let base = dirs::data_dir().unwrap_or_else(std::env::temp_dir);
+    base.join("Vidgo").join("update")
+}
+
+/// 更新日志路径（排查自动更新失败时给用户看）
+pub fn log_path() -> PathBuf {
+    update_dir().join("update.log")
+}
+
+fn append_log(line: &str) {
+    let _ = std::fs::create_dir_all(update_dir());
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path())
+    {
+        let _ = writeln!(file, "[{seconds}] {line}");
+    }
+}
+
+fn emit_progress(app: &AppHandle, stage: &str, downloaded: u64, total: u64, speed: f64) {
+    let _ = app.emit(
+        "update:progress",
+        serde_json::json!({
+            "stage": stage,
+            "downloaded": downloaded,
+            "total": total,
+            "speed": speed,
+        }),
+    );
+}
+
 #[cfg(target_os = "windows")]
 fn launch_installer(setup: &Path) -> Result<(), String> {
     let app_exe = std::env::current_exe().map_err(|e| format!("定位当前程序失败：{e}"))?;
-    // 等当前进程退出后再静默安装，安装完成后重新启动新版本
+    let script_path = update_dir().join("run-update.cmd");
+    let log = log_path();
+    // 用脚本文件而不是一行 cmd：便于记录安装器退出码，失败后也能复查
     let script = format!(
-        "ping -n 3 127.0.0.1 >nul & start \"\" /wait \"{}\" /S & start \"\" \"{}\"",
+        "@echo off\r\n\
+         ping -n 4 127.0.0.1 >nul\r\n\
+         \"{}\" /S /currentuser\r\n\
+         set RC=%ERRORLEVEL%\r\n\
+         >>\"{}\" echo installer exit=%RC%\r\n\
+         start \"\" \"{}\"\r\n",
         setup.display(),
+        log.display(),
         app_exe.display()
     );
+    std::fs::write(&script_path, script).map_err(|e| format!("写入更新脚本失败：{e}"))?;
+    append_log(&format!(
+        "launch installer: {} -> {}",
+        setup.display(),
+        app_exe.display()
+    ));
+
     let mut command = std::process::Command::new("cmd");
     crate::ytdlp::hide_console(&mut command);
     command
-        .args(["/C", &script])
+        .args(["/C", &script_path.to_string_lossy()])
         .spawn()
         .map(|_| ())
         .map_err(|e| format!("启动安装程序失败：{e}"))
@@ -263,46 +315,65 @@ pub async fn install(
         s.data.settings.proxy.clone()
     };
 
-    let client = net::client(&proxy, Duration::from_secs(900))?;
+    append_log(&format!("download start: {url}"));
+    emit_progress(app, "downloading", 0, expected_size.unwrap_or(0), 0.0);
+
+    let client = net::download_client(&proxy)?;
     let mut response = client
         .get(url.clone())
         .send()
         .await
-        .map_err(|e| format!("下载更新失败：{e}"))?;
+        .map_err(|e| {
+            append_log(&format!("download request failed: {e}"));
+            format!("下载更新失败：{e}")
+        })?;
     if !response.status().is_success() {
-        return Err(format!("下载更新失败（HTTP {}）。", response.status().as_u16()));
+        let code = response.status().as_u16();
+        append_log(&format!("download http error: {code}"));
+        return Err(format!("下载更新失败（HTTP {code}）。"));
     }
 
     let total = response.content_length().or(expected_size).unwrap_or(0);
-    let target: PathBuf = std::env::temp_dir().join(safe_file_name(asset_url));
+    let dir = update_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建更新目录失败：{e}"))?;
+    let target: PathBuf = dir.join(safe_file_name(asset_url));
     let _ = std::fs::remove_file(&target);
     let mut file = std::fs::File::create(&target).map_err(|e| format!("写入安装包失败：{e}"))?;
     let mut hasher = Sha256::new();
     let mut downloaded: u64 = 0;
-    let mut reported: u64 = 0;
+    let mut last_emit = std::time::Instant::now();
+    let mut speed_window_start = std::time::Instant::now();
+    let mut speed_window_bytes: u64 = 0;
+    let mut speed: f64 = 0.0;
 
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|e| format!("下载更新中断：{e}"))?
-    {
+    while let Some(chunk) = response.chunk().await.map_err(|e| {
+        append_log(&format!("download interrupted at {downloaded}: {e}"));
+        format!("下载更新中断：{e}")
+    })? {
         file.write_all(&chunk)
             .map_err(|e| format!("写入安装包失败：{e}"))?;
         hasher.update(&chunk);
         downloaded += chunk.len() as u64;
-        if downloaded - reported >= 1_000_000 {
-            reported = downloaded;
-            let _ = app.emit(
-                "update:progress",
-                serde_json::json!({ "downloaded": downloaded, "total": total }),
-            );
+        speed_window_bytes += chunk.len() as u64;
+        let elapsed = speed_window_start.elapsed().as_secs_f64();
+        if elapsed >= 1.0 {
+            speed = speed_window_bytes as f64 / elapsed;
+            speed_window_start = std::time::Instant::now();
+            speed_window_bytes = 0;
+        }
+        if last_emit.elapsed() >= Duration::from_millis(300) {
+            last_emit = std::time::Instant::now();
+            emit_progress(app, "downloading", downloaded, total, speed);
         }
     }
     file.flush().map_err(|e| format!("写入安装包失败：{e}"))?;
     drop(file);
+    append_log(&format!("download done: {downloaded} / {total} bytes"));
 
+    emit_progress(app, "verifying", downloaded, total, 0.0);
     if let Some(expected) = expected_size {
         if expected > 0 && downloaded != expected {
+            append_log(&format!("size mismatch: expected {expected}, got {downloaded}"));
             let _ = std::fs::remove_file(&target);
             return Err(format!(
                 "安装包大小不一致（期望 {expected} 字节，实际 {downloaded} 字节），已取消安装。"
@@ -312,15 +383,14 @@ pub async fn install(
     if let Some(expected) = sha256 {
         let actual = sha256_file(&target)?;
         if !actual.eq_ignore_ascii_case(expected.trim()) {
+            append_log("sha256 mismatch");
             let _ = std::fs::remove_file(&target);
             return Err("安装包校验失败，可能下载不完整，已取消安装。".into());
         }
+        append_log("sha256 verified");
     }
 
-    let _ = app.emit(
-        "update:progress",
-        serde_json::json!({ "downloaded": downloaded, "total": total }),
-    );
+    emit_progress(app, "installing", downloaded, total, 0.0);
 
     #[cfg(target_os = "windows")]
     {

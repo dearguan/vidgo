@@ -61,6 +61,7 @@ pub fn run() -> tauri::Result<()> {
             commands::submit_report,
             commands::check_update,
             commands::install_update,
+            commands::open_update_log,
             commands::open_external_url,
         ])
         // 与 commands.rs 中 State<'_, Mutex<AppStore>> 的类型保持一致

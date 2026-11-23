@@ -1,7 +1,8 @@
 import { useEffect, useState, type ReactElement, type ReactNode } from 'react'
 import type { Settings, ThemeMode } from '../../../shared/types'
 import { Icon } from '../Icon'
-import { useApp } from '../state'
+import { useApp, describeUpdateProgress } from '../state'
+import { api } from '../api'
 
 type CookieBrowser = Settings['cookieBrowser']
 
@@ -57,6 +58,7 @@ export function SettingsPage(): ReactElement {
     checkingUpdate,
     installingUpdate,
     updateProgress,
+    updateError,
     checkUpdate,
     installUpdate
   } = useApp()
@@ -209,14 +211,43 @@ export function SettingsPage(): ReactElement {
             <div className="update-card-text">
               <strong>发现新版本 v{updateInfo.latest}</strong>
               <span className="muted-text">
-                {installingUpdate && updateProgress && updateProgress.total > 0
-                  ? `正在下载 ${Math.min(100, Math.round((updateProgress.downloaded / updateProgress.total) * 100))}%`
+                {installingUpdate
+                  ? describeUpdateProgress(updateProgress)
                   : `当前 v${updateInfo.current}，更新后自动重启`}
               </span>
+              {installingUpdate && (
+                <span className="update-bar" aria-hidden>
+                  <span
+                    className="update-bar-fill"
+                    style={{
+                      width: `${
+                        updateProgress && updateProgress.total > 0
+                          ? Math.min(100, (updateProgress.downloaded / updateProgress.total) * 100)
+                          : 10
+                      }%`
+                    }}
+                  />
+                </span>
+              )}
+              {updateError && !installingUpdate && (
+                <span className="update-error">更新失败：{updateError}</span>
+              )}
             </div>
-            <button className="btn primary small" disabled={installingUpdate} onClick={() => void installUpdate()}>
-              {installingUpdate ? '更新中…' : '立即更新'}
-            </button>
+            <div className="update-card-actions">
+              <button className="btn primary small" disabled={installingUpdate} onClick={() => void installUpdate()}>
+                {installingUpdate ? '更新中…' : '立即更新'}
+              </button>
+              <button
+                className="btn secondary small"
+                disabled={!updateInfo.assetUrl}
+                onClick={() => updateInfo.assetUrl && void api.openExternal?.(updateInfo.assetUrl)}
+              >
+                浏览器下载
+              </button>
+              <button className="btn-text muted" onClick={() => void api.openUpdateLog?.().catch(() => {})}>
+                查看更新日志
+              </button>
+            </div>
           </div>
         ) : updateInfo ? (
           <Row label="更新状态">

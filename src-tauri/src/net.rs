@@ -14,6 +14,22 @@ pub fn client(proxy: &str, timeout: Duration) -> Result<reqwest::Client, String>
     builder.build().map_err(|e| format!("创建网络客户端失败：{e}"))
 }
 
+/// 下载大文件专用：只限制连接和两次读取之间的空闲时间，不限制总时长。
+/// 总时长限制会把国内访问 GitHub 的慢速下载提前掐断。
+pub fn download_client(proxy: &str) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
+        .user_agent(concat!("Vidgo/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(20))
+        .read_timeout(Duration::from_secs(90));
+    let proxy = proxy.trim();
+    if !proxy.is_empty() {
+        if let Ok(parsed) = reqwest::Proxy::all(proxy) {
+            builder = builder.proxy(parsed);
+        }
+    }
+    builder.build().map_err(|e| format!("创建网络客户端失败：{e}"))
+}
+
 /// 隐藏代理地址中的账号密码，避免写进上报内容。
 pub fn mask_proxy(proxy: &str) -> String {
     let proxy = proxy.trim();

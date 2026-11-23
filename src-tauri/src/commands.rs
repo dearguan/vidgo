@@ -1144,6 +1144,39 @@ pub async fn install_update(
 }
 
 #[tauri::command]
+pub async fn open_update_log() -> Result<(), String> {
+    let path = crate::update::log_path();
+    if !path.exists() {
+        return Err("还没有更新日志，请先尝试一次更新。".into());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(format!("/select,{}", path.display()))
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("打开更新日志失败：{e}"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(&path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("打开更新日志失败：{e}"))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(path.parent().unwrap_or(Path::new(".")))
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("打开更新日志失败：{e}"))
+    }
+}
+
+#[tauri::command]
 pub async fn open_external_url(url: String) -> Result<(), String> {
     let parsed = reqwest::Url::parse(url.trim()).map_err(|_| "链接格式不正确。".to_string())?;
     if parsed.scheme() != "http" && parsed.scheme() != "https" {

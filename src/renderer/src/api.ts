@@ -112,6 +112,7 @@ const electronApi = {
     window.open(url, '_blank')
     return Promise.resolve()
   },
+  openUpdateLog: (): Promise<void> => unsupported('查看更新日志'),
   onUpdateProgress: (): (() => void) => () => {},
   onTasksChanged: (cb: (tasks: DownloadTask[]) => void): (() => void) =>
     (globalThis as any).window?.api?.onTasksChanged?.(cb) ?? (() => {}),
@@ -183,6 +184,7 @@ const tauriApi = {
   installUpdate: (assetUrl: string, sha256?: string, size?: number) =>
     tauriApi.invoke<void>('install_update', { assetUrl, sha256, size }),
   openExternal: (url: string) => tauriApi.invoke<void>('open_external_url', { url }),
+  openUpdateLog: () => tauriApi.invoke<void>('open_update_log'),
   onUpdateProgress: (cb: (progress: UpdateProgress) => void): (() => void) => {
     let un: (() => void) | null = null
     tauriApi.listen<UpdateProgress>('update:progress', cb).then((fn) => { un = fn })
