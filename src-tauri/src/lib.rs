@@ -57,6 +57,7 @@ pub fn run() -> tauri::Result<()> {
             commands::sniffer_report,
             commands::sniffer_list,
             commands::sniffer_enqueue,
+            commands::sniffer_enqueue_page,
             commands::browser_login_done,
             commands::submit_report,
             commands::check_update,

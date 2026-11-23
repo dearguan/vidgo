@@ -14,6 +14,11 @@ description = "Allows the built-in browser sidebar to enqueue a captured media U
 commands.allow = ["sniffer_enqueue"]
 
 [[permission]]
+identifier = "allow-sniffer-enqueue-page"
+description = "Allows the built-in browser sidebar to send the current page to the main window for parsing."
+commands.allow = ["sniffer_enqueue_page"]
+
+[[permission]]
 identifier = "allow-browser-login-done"
 description = "Allows the built-in browser sidebar to export cookies after login."
 commands.allow = ["browser_login_done"]

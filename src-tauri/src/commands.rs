@@ -1091,10 +1091,22 @@ pub async fn sniffer_report(
     crate::browser::report(&window, state.inner(), url, page_url, title)
 }
 
-/// 内置浏览器侧栏拉取已捕获的媒体列表
+/// 内置浏览器侧栏拉取**当前页面**已捕获的媒体列表
 #[tauri::command]
-pub async fn sniffer_list(state: State<'_, Mutex<SnifferState>>) -> Result<Vec<SnifferPayload>, String> {
-    crate::browser::list(state.inner())
+pub async fn sniffer_list(
+    state: State<'_, Mutex<SnifferState>>,
+    page_url: Option<String>,
+) -> Result<Vec<SnifferPayload>, String> {
+    crate::browser::list(state.inner(), page_url.as_deref())
+}
+
+/// 侧栏「解析当前页面」：由后端读取浏览器当前地址，不信任页面传入的 URL
+#[tauri::command]
+pub async fn sniffer_enqueue_page(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<(), String> {
+    crate::browser::enqueue_page(&app, &window)
 }
 
 /// 侧栏点「添加」：仅接受已捕获列表中的地址

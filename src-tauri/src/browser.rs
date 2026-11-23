@@ -223,8 +223,32 @@ const SNIFFER_SCRIPT: &str = r##"
     countEl.textContent = label;
     capsuleEl.textContent = label;
     listEl.textContent = '';
+
+    // 当前页面固定入口：即使没捕获到独立媒体地址，也能直接交给主窗口解析
+    const pageCard = make('div', 'vg-item');
+    const pageTop = make('div');
+    pageTop.appendChild(make('span', 'vg-badge', 'PAGE'));
+    pageTop.appendChild(make('span', 'vg-name', document.title || location.hostname || '当前页面'));
+    const pageUrlLine = make('div', 'vg-url', location.href);
+    const pageBtn = make('button', 'vg-btn vg-add', '解析当前页面');
+    pageBtn.addEventListener('click', () => {
+      pageBtn.disabled = true;
+      pageBtn.textContent = '已发送…';
+      Promise.resolve(invoke('sniffer_enqueue_page')).then(() => {
+        if (statusEl) statusEl.textContent = '已将当前页面交给主窗口解析';
+      }).catch((error) => {
+        pageBtn.disabled = false;
+        pageBtn.textContent = '解析当前页面';
+        if (statusEl) statusEl.textContent = '发送失败：' + (error && error.message ? error.message : error);
+      });
+    });
+    pageCard.appendChild(pageTop);
+    pageCard.appendChild(pageUrlLine);
+    pageCard.appendChild(pageBtn);
+    listEl.appendChild(pageCard);
+
     if (!latest.length) {
-      listEl.appendChild(make('div', 'vg-empty', '播放页面里的视频，这里会出现可下载地址'));
+      listEl.appendChild(make('div', 'vg-empty', '没有捕获到独立媒体地址，可直接点上面的「解析当前页面」'));
       return;
     }
     for (const item of latest) {
@@ -314,10 +338,20 @@ const SNIFFER_SCRIPT: &str = r##"
     render();
   }
 
+  let lastPage = '';
+  let lastJson = '';
+
   function refresh() {
-    Promise.resolve(invoke('sniffer_list')).then((items) => {
-      latest = Array.isArray(items) ? items : [];
-      render();
+    Promise.resolve(invoke('sniffer_list', { pageUrl: location.href })).then((items) => {
+      const list = Array.isArray(items) ? items : [];
+      const json = JSON.stringify(list);
+      const pageChanged = location.href !== lastPage;
+      if (pageChanged) lastPage = location.href;
+      if (json !== lastJson || pageChanged) {
+        lastJson = json;
+        latest = list;
+        render();
+      }
     }).catch(() => {});
   }
 
@@ -479,10 +513,62 @@ pub fn report(
         .map_err(|error| error.to_string())
 }
 
-/// 侧栏拉取已捕获的媒体列表
-pub fn list(state: &Mutex<SnifferState>) -> Result<Vec<SnifferPayload>, String> {
+/// 归一化 URL 用于「是否同一页面」判断：忽略片段、末尾斜杠和端口
+fn normalize_url(raw: &str) -> String {
+    match Url::parse(raw.trim()) {
+        Ok(url) => {
+            let trimmed = url.path().trim_end_matches('/');
+            let path = if trimmed.is_empty() { "/" } else { trimmed };
+            let query = url.query().map(|q| format!("?{q}")).unwrap_or_default();
+            format!(
+                "{}://{}{}{}",
+                url.scheme(),
+                url.host_str().unwrap_or_default(),
+                path,
+                query
+            )
+        }
+        Err(_) => raw.trim().trim_end_matches('/').to_string(),
+    }
+}
+
+/// 侧栏拉取当前页面的媒体列表（不同页面的历史记录不再混在一起）
+pub fn list(
+    state: &Mutex<SnifferState>,
+    page_url: Option<&str>,
+) -> Result<Vec<SnifferPayload>, String> {
     let guard = state.lock().map_err(|error| error.to_string())?;
-    Ok(guard.media.clone())
+    let current = page_url.map(normalize_url);
+    Ok(guard
+        .media
+        .iter()
+        .filter(|item| match &current {
+            Some(current) => normalize_url(&item.page_url) == *current,
+            None => true,
+        })
+        .cloned()
+        .collect())
+}
+
+/// 侧栏「解析当前页面」：把浏览器当前地址交给主窗口解析
+pub fn enqueue_page(app: &AppHandle, window: &WebviewWindow) -> Result<(), String> {
+    let current = window.url().map_err(|error| error.to_string())?;
+    if current.scheme() != "http" && current.scheme() != "https" {
+        return Err("当前页面不是网页，无法解析。".into());
+    }
+    let payload = SnifferPayload {
+        id: Uuid::new_v4().to_string(),
+        url: current.to_string(),
+        media_type: "page",
+        title: String::new(),
+        page_url: current.to_string(),
+        timestamp: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or_default(),
+    };
+    app.emit("sniffer:enqueue", payload)
+        .map_err(|error| error.to_string())
 }
 
 /// 侧栏点「添加」：只接受已捕获列表中的地址，防止第三方页面伪造下载
@@ -624,6 +710,37 @@ fn classify_media_type(url: &Url) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scopes_media_list_to_current_page() {
+        let item = |url: &str, page: &str| SnifferPayload {
+            id: url.to_string(),
+            url: url.to_string(),
+            media_type: "mp4",
+            title: "t".into(),
+            page_url: page.into(),
+            timestamp: 0,
+        };
+        let state = Mutex::new(SnifferState {
+            media: vec![
+                item(
+                    "https://cdn.example.com/a.mp4",
+                    "https://www.bilibili.com/video/BV1",
+                ),
+                item(
+                    "https://cdn.example.com/b.mp4",
+                    "https://www.douyin.com/video/2",
+                ),
+            ],
+            ..Default::default()
+        });
+        let bili = list(&state, Some("https://www.bilibili.com/video/BV1/")).unwrap();
+        assert_eq!(bili.len(), 1);
+        assert!(bili[0].url.ends_with("a.mp4"));
+        assert!(list(&state, Some("https://www.bilibili.com/video/BV9"))
+            .unwrap()
+            .is_empty());
+    }
 
     #[test]
     fn netscape_cookie_line_marks_httponly_and_flags() {

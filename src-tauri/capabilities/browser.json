@@ -11,6 +11,7 @@
     "allow-sniffer-report",
     "allow-sniffer-list",
     "allow-sniffer-enqueue",
+    "allow-sniffer-enqueue-page",
     "allow-browser-login-done"
   ]
 }
