@@ -24,15 +24,14 @@ const DOMAIN_LABELS: Record<string, string> = {
 }
 
 const BROWSER_OPTIONS: Array<{ value: CookieBrowser; label: string; hint?: string }> = [
-  { value: 'auto', label: '自动检测（推荐）', hint: '依次尝试系统中可用的浏览器 Cookie' },
+  { value: 'none', label: '不读取（推荐，使用站点登录）' },
   { value: 'chrome', label: 'Google Chrome' },
   { value: 'edge', label: 'Microsoft Edge' },
   { value: 'brave', label: 'Brave' },
   { value: 'firefox', label: 'Firefox' },
   { value: 'safari', label: 'Safari' },
   { value: 'vivaldi', label: 'Vivaldi' },
-  { value: 'opera', label: 'Opera' },
-  { value: 'none', label: '不读取' }
+  { value: 'opera', label: 'Opera' }
 ]
 
 function Group({ title, onReset, children }: { title: string; onReset?: () => void; children: ReactNode }): ReactElement {
@@ -168,7 +167,7 @@ export function SettingsPage(): ReactElement {
         </Row>
       </Group>
 
-      <Group title={`站点登录${siteLogins.length > 0 ? `（${siteLogins.length}）` : ''}`} onReset={() => patch({ cookieBrowser: 'auto' })}>
+      <Group title={`站点登录${siteLogins.length > 0 ? `（${siteLogins.length}）` : ''}`}>
         <Row
           label="登录新站点"
           hint="填入网站地址，在打开的内置浏览器里登录。登录后点页面右上角「完成登录」，Cookie 会按站点保存，之后解析和下载该站点会自动使用。"
@@ -226,7 +225,7 @@ export function SettingsPage(): ReactElement {
         >
           <select
             className="input select"
-            value={settings.cookieBrowser}
+            value={settings.cookieBrowser === 'auto' ? 'none' : settings.cookieBrowser || 'none'}
             aria-label="读取系统浏览器 Cookie"
             onChange={(e) => patch({ cookieBrowser: e.target.value as CookieBrowser })}
           >
