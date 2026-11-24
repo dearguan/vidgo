@@ -272,6 +272,31 @@ pub async fn parse_media(state: State<'_, Mutex<AppStore>>, url: String) -> Resu
     };
     let url = ytdlp::canonicalize_url(&url);
 
+    if ytdlp::is_douyin_url(&url) {
+        return Ok(
+            match ytdlp::resolve_douyin(&url, &ytdlp::effective_proxy(&settings, &url)).await {
+                Ok(info) => ParseResult {
+                    ok: true,
+                    info: Some(info),
+                    message: None,
+                    detail: None,
+                    needs_login: false,
+                    browser_cookies: false,
+                },
+                Err(e) => ParseResult {
+                    ok: false,
+                    info: None,
+                    message: Some(
+                        "抖音解析失败。请先在「设置 → 站点登录」登录抖音，再重试。".into(),
+                    ),
+                    detail: Some(e),
+                    needs_login: true,
+                    browser_cookies: false,
+                },
+            },
+        );
+    }
+
     if ytdlp::is_hongguo_url(&url) {
         return Ok(match ytdlp::resolve_hongguo(&url, &ytdlp::effective_proxy(&settings, &url)).await {
             Ok(media) => ParseResult {
@@ -308,8 +333,10 @@ pub async fn parse_media(state: State<'_, Mutex<AppStore>>, url: String) -> Resu
     let (needs_login, mut message, detail) = loop {
         let cookies = if attempt == 0 {
             ytdlp::cookie_args(&settings, &url)
-        } else {
+        } else if ytdlp::has_site_cookie_file(&url) {
             ytdlp::cookie_args_merged(&settings, &url)
+        } else {
+            ytdlp::cookie_args_browser(&settings)
         };
         let mut args = base_args.clone();
         args.extend(cookies.args.iter().cloned());
@@ -356,7 +383,6 @@ pub async fn parse_media(state: State<'_, Mutex<AppStore>>, url: String) -> Resu
         let cookie_related = needs_login_error(&stderr);
         let can_merge = attempt == 0
             && cookie_related
-            && ytdlp::has_site_cookie_file(&url)
             && ytdlp::has_browser_cookie_source(&settings);
         if !can_merge {
             break (cookie_related, humanize_err(&stderr), stderr);
@@ -386,7 +412,7 @@ pub async fn parse_media(state: State<'_, Mutex<AppStore>>, url: String) -> Resu
 
 /// 判断失败原因是否属于「需要登录 / Cookie」，用于引导用户去内置浏览器登录
 fn needs_login_error(detail: &str) -> bool {
-    const KEYS: [&str; 9] = [
+    const KEYS: [&str; 10] = [
         "Fresh cookies",
         "Sign in to confirm",
         "login required",
@@ -396,6 +422,7 @@ fn needs_login_error(detail: &str) -> bool {
         "Could not copy Chrome cookie database",
         "cookie database",
         "could not decrypt",
+        "failed to decrypt",
     ];
     let lower = detail.to_lowercase();
     KEYS.iter().any(|key| lower.contains(&key.to_lowercase()))
@@ -408,8 +435,8 @@ fn humanize_err(detail: &str) -> String {
         ("HTTP Error 403|Forbidden", "网站拒绝访问（403）。可能是地区限制或需要登录。"),
         ("HTTP Error 404|not found", "视频不存在或已被删除（404）。"),
         ("getaddrinfo|timed out|Connection refused|SSL", "网络连接失败，请检查网络或代理设置。"),
-        ("Could not copy Chrome cookie database|failed to decrypt|could not decrypt|cookie database", "无法读取系统浏览器的 Cookie（浏览器正在运行或新版加密保护）。请在「设置 → 站点登录」用内置浏览器登录该网站。"),
-        ("Fresh cookies", "该网站需要登录 Cookie。请在「设置 → 站点登录」用内置浏览器登录该网站后重试，也可以改为读取系统浏览器 Cookie。"),
+        ("Could not copy Chrome cookie database|failed to decrypt|could not decrypt|cookie database", "无法读取系统浏览器的 Cookie（浏览器正在运行或新版加密保护）。请完全退出该浏览器后重试，或在「设置 → 站点登录」用内置浏览器登录该网站。"),
+        ("Fresh cookies", "站点拒绝了当前 Cookie：请先确认已保存该站点登录，仍失败则可能是网站启用了签名校验（如抖音），改用「用内置浏览器捕获」在页面播放后添加媒体。"),
         ("ffmpeg|ffprobe", "FFmpeg 处理失败，请检查组件是否完整。"),
         ("No space left|ENOSPC|disk quota", "磁盘空间不足，请更换保存位置。"),
         ("Permission denied|EACCES|EPERM", "没有写入权限，请更换保存位置。"),
@@ -555,12 +582,35 @@ pub async fn start_download(
                     return;
                 }
             }
+        } else if ytdlp::is_douyin_url(&download_url) {
+            match ytdlp::resolve_douyin(&download_url, &ytdlp::effective_proxy(&settings, &download_url)).await {
+                Ok(info) => download_url = info.url,
+                Err(e) => {
+                    let mut s = state.inner().lock().unwrap();
+                    if let Some(t) = s.data.tasks.iter_mut().find(|t| t.id == id2) {
+                        t.status = TaskStatus::Failed;
+                        t.error = Some("抖音视频地址获取失败，请重新解析后再下载。".into());
+                        t.error_detail = Some(e);
+                    }
+                    s.save();
+                    let _ = app2.emit("tasks:changed", s.data.tasks.clone());
+                    return;
+                }
+            }
         }
-        let cookies = if task_clone.browser_cookies {
-            ytdlp::cookie_args_merged(&settings, &download_url)
-        } else {
-            ytdlp::cookie_args(&settings, &download_url)
-        };
+        // Cookie 来源兜底：浏览器 Cookie 读不到时去掉；站点 Cookie 失效时再加上浏览器
+        let mut modes: Vec<bool> = vec![task_clone.browser_cookies];
+        if ytdlp::has_browser_cookie_source(&settings) {
+            modes.push(!task_clone.browser_cookies);
+        }
+        for (attempt, &use_browser) in modes.iter().enumerate() {
+            let cookies = if use_browser && ytdlp::has_site_cookie_file(&download_url) {
+                ytdlp::cookie_args_merged(&settings, &download_url)
+            } else if use_browser {
+                ytdlp::cookie_args_browser(&settings)
+            } else {
+                ytdlp::cookie_args(&settings, &download_url)
+            };
         let mut args = ytdlp::build_download_args(
             &download_url, &task_clone.selector, &task_clone.save_dir,
             &ytdlp::effective_proxy(&settings, &download_url), &cookies.args,
@@ -768,6 +818,24 @@ pub async fn start_download(
                 }
             }
             Ok(status) => {
+                // 换一种 Cookie 来源再试一次：浏览器库被占用就去掉浏览器，站点 Cookie 失效就加上浏览器
+                let can_retry = attempt + 1 < modes.len()
+                    && if use_browser {
+                        ytdlp::is_browser_cookie_error(&stderr_buf)
+                    } else {
+                        needs_login_error(&stderr_buf)
+                    };
+                if can_retry {
+                    with_task(&state, &app2, &id2, |t| {
+                        t.status = TaskStatus::Downloading;
+                        t.progress = 0.0;
+                        t.downloaded = 0;
+                        t.total = 0;
+                        t.speed = 0.0;
+                        t.eta = None;
+                    });
+                    continue;
+                }
                 let detail = format!(
                     "{}\n\n--- 退出状态 {} ---\n--- yt-dlp 输出 ---\n{}",
                     task_clone.url,
@@ -791,6 +859,7 @@ pub async fn start_download(
                     t.error = Some(e.to_string());
                 });
             }
+        }
         }
     });
 

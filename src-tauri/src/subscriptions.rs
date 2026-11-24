@@ -166,8 +166,10 @@ pub fn fetch_flat_playlist(
     loop {
         let cookies = if attempt == 0 {
             crate::ytdlp::cookie_args(settings, &url)
-        } else {
+        } else if crate::ytdlp::has_site_cookie_file(&url) {
             crate::ytdlp::cookie_args_merged(settings, &url)
+        } else {
+            crate::ytdlp::cookie_args_browser(settings)
         };
         let mut command = Command::new(crate::ytdlp::ytdlp_path());
         crate::ytdlp::hide_console(&mut command);
@@ -194,7 +196,6 @@ pub fn fetch_flat_playlist(
 
         let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let can_merge = attempt == 0
-            && crate::ytdlp::has_site_cookie_file(&url)
             && crate::ytdlp::has_browser_cookie_source(settings)
             && [
                 "Fresh cookies",

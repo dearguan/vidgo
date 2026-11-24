@@ -507,6 +507,181 @@ pub fn has_site_cookie_file(target_url: &str) -> bool {
     cookie_file_for_url(target_url).is_some()
 }
 
+/// 把站点登录文件拼成 `Cookie` 请求头（用于自研解析器）。
+/// 文件本身只包含该站点的 Cookie，这里不再按请求域名过滤，
+/// 以免短链域名与主站域名不一致时漏掉登录 Cookie。
+pub fn site_cookie_header(target_url: &str) -> Option<String> {
+    let path = cookie_file_for_url(target_url)?;
+    let text = std::fs::read_to_string(path).ok()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mut pairs = Vec::new();
+    for line in text.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() || (line.starts_with('#') && !line.starts_with("#HttpOnly_")) {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() < 7 || fields[5].is_empty() {
+            continue;
+        }
+        let expires = fields[4].parse::<i64>().unwrap_or(0);
+        if expires != 0 && expires < now {
+            continue;
+        }
+        pairs.push(format!("{}={}", fields[5], fields[6]));
+    }
+    (!pairs.is_empty()).then(|| pairs.join("; "))
+}
+
+pub fn is_douyin_url(url: &str) -> bool {
+    reqwest::Url::parse(url.trim()).ok().is_some_and(|parsed| {
+        parsed.host_str().is_some_and(|host| {
+            let host = host.to_ascii_lowercase();
+            host == "douyin.com"
+                || host.ends_with(".douyin.com")
+                || host == "iesdouyin.com"
+                || host.ends_with(".iesdouyin.com")
+        })
+    })
+}
+
+fn douyin_id_from_url(url: &reqwest::Url) -> Option<String> {
+    let pattern = regex::Regex::new(r"/(?:video|note)/(\d{8,})").ok()?;
+    if let Some(captures) = pattern.captures(url.path()) {
+        return Some(captures[1].to_string());
+    }
+    url.query_pairs()
+        .find(|(key, _)| key == "vid" || key == "modal_id")
+        .map(|(_, value)| value.into_owned())
+        .filter(|value| value.len() >= 8 && value.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// 抖音网页接口需要 `a_bogus` 签名（yt-dlp 上游已失效），但移动端详情接口
+/// 只要带上内置浏览器登录后的 Cookie 就能直接返回播放地址。
+pub async fn resolve_douyin(url: &str, proxy: &str) -> Result<MediaInfo, String> {
+    let mut builder = reqwest::Client::builder()
+        .user_agent(HONGGUO_USER_AGENT)
+        .timeout(std::time::Duration::from_secs(25));
+    if !proxy.is_empty() {
+        builder = builder
+            .proxy(reqwest::Proxy::all(proxy).map_err(|e| format!("代理配置无效：{e}"))?);
+    }
+    let client = builder.build().map_err(|e| e.to_string())?;
+
+    let parsed = reqwest::Url::parse(url.trim()).map_err(|e| format!("链接无效：{e}"))?;
+    let id = match douyin_id_from_url(&parsed) {
+        Some(id) => id,
+        None => {
+            // v.douyin.com 短链：跟随跳转后从最终地址里取视频 ID
+            let response = client
+                .get(parsed)
+                .header(reqwest::header::REFERER, "https://www.douyin.com/")
+                .send()
+                .await
+                .map_err(|e| format!("打开抖音链接失败：{e}"))?;
+            douyin_id_from_url(response.url())
+                .ok_or_else(|| "无法从链接中识别抖音视频，请改用视频页链接。".to_string())?
+        }
+    };
+
+    let api = format!(
+        "https://aweme.snssdk.com/aweme/v1/aweme/detail/?aweme_id={id}&aid=1128&device_platform=iphone"
+    );
+    let mut request = client
+        .get(&api)
+        .header(reqwest::header::REFERER, "https://www.douyin.com/");
+    if let Some(cookie) = site_cookie_header(url) {
+        request = request.header(reqwest::header::COOKIE, cookie);
+    }
+    let payload: serde_json::Value = request
+        .send()
+        .await
+        .map_err(|e| format!("请求抖音接口失败：{e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("抖音接口返回异常：{e}"))?;
+
+    if let Some(code) = payload.get("status_code").and_then(serde_json::Value::as_i64) {
+        if code != 0 {
+            let message = payload
+                .get("status_msg")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("未知错误");
+            return Err(format!("抖音接口返回错误（{code}）：{message}"));
+        }
+    }
+    let detail = payload
+        .get("aweme_detail")
+        .filter(|value| !value.is_null())
+        .ok_or_else(|| "抖音没有返回视频信息，请确认已在「设置 → 站点登录」登录抖音。".to_string())?;
+
+    let text = |pointer: &str| {
+        detail
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    let play_url = text("/video/play_addr/url_list/0")
+        .or_else(|| text("/video/bit_rate/0/play_addr/url_list/0"))
+        .or_else(|| text("/video/download_addr/url_list/0"))
+        .ok_or_else(|| "抖音没有返回可下载地址，视频可能已删除或需要登录。".to_string())?;
+    let height = detail
+        .pointer("/video/height")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u16::try_from(value).ok());
+    let title = text("/desc").unwrap_or_else(|| "抖音视频".into());
+    let video_label = height
+        .map(|height| format!("原画 {height}P（MP4）"))
+        .unwrap_or_else(|| "原画（MP4）".into());
+
+    Ok(MediaInfo {
+        id,
+        url: play_url,
+        title,
+        thumbnail: text("/video/cover/url_list/0")
+            .or_else(|| text("/video/origin_cover/url_list/0")),
+        duration: detail
+            .pointer("/video/duration")
+            .and_then(serde_json::Value::as_f64)
+            .map(|ms| ms / 1000.0),
+        uploader: text("/author/nickname"),
+        site: Some("抖音".into()),
+        formats: vec![
+            FormatOption {
+                id: "source".into(),
+                label: video_label,
+                kind: "video".into(),
+                selector: "best".into(),
+                audio_format: None,
+                height,
+                ext: Some("mp4".into()),
+            },
+            FormatOption {
+                id: "audio-mp3".into(),
+                label: "仅下载音频 MP3".into(),
+                kind: "audio".into(),
+                selector: "best".into(),
+                audio_format: Some("mp3".into()),
+                height: None,
+                ext: Some("mp3".into()),
+            },
+            FormatOption {
+                id: "audio-m4a".into(),
+                label: "仅下载音频 M4A".into(),
+                kind: "audio".into(),
+                selector: "best".into(),
+                audio_format: Some("m4a".into()),
+                height: None,
+                ext: Some("m4a".into()),
+            },
+        ],
+    })
+}
+
 /// 是否配置了可从系统浏览器读取 Cookie
 pub fn has_browser_cookie_source(settings: &crate::store::Settings) -> bool {
     browser_cookie_source(&settings.cookies_from_browser).is_some()
@@ -529,8 +704,9 @@ fn site_cookie_file_args(target_url: &str) -> (Vec<String>, Option<PathBuf>) {
     )
 }
 
-/// 优先使用该站点已保存的登录 Cookie，其次回退系统浏览器。
-pub fn cookie_args(settings: &crate::store::Settings, target_url: &str) -> CookieArgs {
+/// 站点登录 Cookie。**不包含系统浏览器**：系统浏览器的 Cookie 数据库在 Windows
+/// 上经常因为浏览器正在运行而无法复制，若默认带上会让所有不需要登录的站点一起失败。
+pub fn cookie_args(_settings: &crate::store::Settings, target_url: &str) -> CookieArgs {
     if is_direct_media_url(target_url) {
         return CookieArgs {
             args: Vec::new(),
@@ -538,18 +714,20 @@ pub fn cookie_args(settings: &crate::store::Settings, target_url: &str) -> Cooki
         };
     }
     let (args, temp) = site_cookie_file_args(target_url);
-    if temp.is_some() {
-        return CookieArgs { args, temp };
-    }
-    if let Some(browser) = browser_cookie_source(&settings.cookies_from_browser) {
-        return CookieArgs {
+    CookieArgs { args, temp }
+}
+
+/// 只使用系统浏览器 Cookie（站点没有内置登录时，作为登录兜底）
+pub fn cookie_args_browser(settings: &crate::store::Settings) -> CookieArgs {
+    match browser_cookie_source(&settings.cookies_from_browser) {
+        Some(browser) => CookieArgs {
             args: vec!["--cookies-from-browser".into(), browser.to_string()],
             temp: None,
-        };
-    }
-    CookieArgs {
-        args: Vec::new(),
-        temp: None,
+        },
+        None => CookieArgs {
+            args: Vec::new(),
+            temp: None,
+        },
     }
 }
 
@@ -568,6 +746,22 @@ pub fn cookie_args_merged(settings: &crate::store::Settings, target_url: &str) -
         args.push(browser.to_string());
     }
     CookieArgs { args, temp }
+}
+
+/// 系统浏览器 Cookie 读取失败（浏览器运行中 / 新版加密 / 未安装）。
+/// 这类错误不应让「不需要 Cookie 的站点」一起失败，调用方应去掉浏览器来源重试。
+pub fn is_browser_cookie_error(detail: &str) -> bool {
+    let lower = detail.to_lowercase();
+    [
+        "could not copy chrome cookie database",
+        "cookie database",
+        "failed to decrypt",
+        "could not decrypt",
+        "could not find",
+        "cookie load",
+    ]
+    .iter()
+    .any(|key| lower.contains(key))
 }
 
 fn normalized_domain(raw: &str) -> Result<String, String> {
@@ -711,11 +905,11 @@ pub fn build_download_args(
             args.push("0".into());
         }
     }
-    if let Some(h) = height {
-        args.push("--merge-output-format".into());
+    if height.is_some() {
+        // 用 remux 而不是 merge-output-format：后者在只有 WebM/VP9 流时会让合并直接失败，
+        // remux 失败也只是保留原容器，不影响下载成功。
+        args.push("--remux-video".into());
         args.push("mp4".into());
-        // 保证 ffmpeg 合并
-        let _ = h; // 已在 selector 里体现
     }
     if !proxy.is_empty() {
         args.push("--proxy".into());
@@ -829,6 +1023,57 @@ mod tests {
             effective_proxy(&settings, "https://v.douyin.com/x/"),
             "http://127.0.0.1:7880"
         );
+    }
+
+    #[test]
+    fn detects_browser_cookie_read_failures() {
+        assert!(is_browser_cookie_error(
+            "ERROR: Could not copy Chrome cookie database. See https://github.com/yt-dlp/yt-dlp/issues/7271"
+        ));
+        assert!(is_browser_cookie_error("ERROR: failed to decrypt cookie value"));
+        assert!(!is_browser_cookie_error(
+            "ERROR: [Douyin] 123: Fresh cookies (not necessarily logged in) are needed"
+        ));
+    }
+
+    #[test]
+    fn browser_cookie_args_only_for_real_browsers() {
+        let settings = crate::store::Settings {
+            cookies_from_browser: "edge".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            cookie_args_browser(&settings).args,
+            vec!["--cookies-from-browser".to_string(), "edge".to_string()]
+        );
+        let settings = crate::store::Settings {
+            cookies_from_browser: "auto".into(),
+            ..Default::default()
+        };
+        assert!(cookie_args_browser(&settings).args.is_empty());
+    }
+
+    #[test]
+    fn detects_douyin_links_and_ids() {
+        assert!(is_douyin_url("https://v.douyin.com/8j4yabLB-dk/"));
+        assert!(is_douyin_url(
+            "https://www.douyin.com/user/x?vid=7680497115004505396"
+        ));
+        assert!(!is_douyin_url("https://www.bilibili.com/video/BV1xx"));
+        let url = reqwest::Url::parse("https://www.iesdouyin.com/share/video/7680497115004505396/").unwrap();
+        assert_eq!(douyin_id_from_url(&url).as_deref(), Some("7680497115004505396"));
+    }
+
+    /// 需要真实网络 + 已登录的抖音 Cookie：`cargo test douyin_live -- --ignored`
+    #[tokio::test]
+    #[ignore]
+    async fn douyin_live() {
+        let info = resolve_douyin("https://v.douyin.com/8j4yabLB-dk/", "")
+            .await
+            .expect("解析失败");
+        assert!(info.url.starts_with("http"));
+        assert!(!info.title.is_empty());
+        println!("{} | {} | {}", info.title, info.id, info.url);
     }
 
     #[test]

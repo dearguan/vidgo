@@ -736,7 +736,11 @@ pub async fn export_cookies(app: &AppHandle) -> Result<crate::ytdlp::SiteLogin, 
         if name.is_empty() || invalid(name) || invalid(value) {
             continue;
         }
-        let include_sub = if cookie_domain.starts_with('.') { "TRUE" } else { "FALSE" };
+        // WKWebView/WebView2 的 domain() 可能不带前导点（macOS 会剥掉），
+        // 若按「无点=host-only」写 FALSE，`douyin.com` 的 Cookie 就不会发给
+        // www.douyin.com，导致登录态缺失。统一按域 Cookie 写入，让 yt-dlp
+        // 自己按域名匹配。
+        let include_sub = "TRUE";
         let path = cookie.path().unwrap_or("/");
         let secure = if cookie.secure().unwrap_or(false) { "TRUE" } else { "FALSE" };
         let expires = cookie

@@ -15,7 +15,7 @@ function middleEllipsis(text: string, max = 46): string {
 }
 
 export function HomePage(): ReactElement {
-  const { settings, chooseDir, notify, setView, parseRequest, clearParseRequest, loginFor } = useApp()
+  const { settings, chooseDir, notify, setView, parseRequest, clearParseRequest, loginFor, openBuiltinBrowser } = useApp()
   const [url, setUrl] = useState('')
   const [media, setMedia] = useState<MediaInfo | null>(null)
   const [formatId, setFormatId] = useState('')
@@ -344,8 +344,8 @@ export function HomePage(): ReactElement {
           </div>
           <p className="error-suggestion">
             {parseError.needsLogin
-              ? '这个网站需要登录才能获取视频。点「去登录」打开内置浏览器，登录完成后点右上角「完成登录」，会自动重新解析。'
-              : '建议：检查网址是否完整、网络是否可访问该网站，然后重试。若持续失败，可能是网站更新导致解析器暂时失效。'}
+              ? '这个网站需要登录才能获取视频。先点「去登录」在内置浏览器登录；如果登录后仍提示 Fresh cookies（例如抖音），说明网站启用了签名校验，请点「用内置浏览器捕获」，在页面里播放视频后，从右侧媒体列表点「添加」。'
+              : '建议：检查网址是否完整、网络是否可访问该网站，然后重试。也可以点「用内置浏览器捕获」，在浏览器里打开并播放，再从右侧媒体列表添加，绕过网站的反爬校验。'}
           </p>
           <div className="error-actions">
             {parseError.needsLogin && (
@@ -354,6 +354,10 @@ export function HomePage(): ReactElement {
                 去登录
               </button>
             )}
+            <button className="btn secondary" onClick={() => void openBuiltinBrowser(url)}>
+              <Icon name="globe" size={16} />
+              用内置浏览器捕获
+            </button>
             <button className={parseError.needsLogin ? 'btn secondary' : 'btn primary'} onClick={() => void startParse()}>
               重试
             </button>
