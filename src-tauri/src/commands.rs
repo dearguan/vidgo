@@ -41,7 +41,9 @@ where
     let _ = app.emit("tasks:changed", s.data.tasks.clone());
 }
 
-const MEDIA_EXTS: [&str; 8] = ["mp4", "m4a", "mp3", "webm", "mkv", "mov", "flv", "aac"];
+const MEDIA_EXTS: [&str; 14] = [
+    "mp4", "m4a", "mp3", "webm", "mkv", "mov", "flv", "aac", "m4s", "ts", "3gp", "asf", "wmv", "ogg",
+];
 
 /// 校验文件头，识别「HTML/JSON 错误页被存成 .mp4」这类假成功。
 fn looks_like_media(path: &Path) -> bool {
@@ -59,7 +61,7 @@ fn looks_like_media(path: &Path) -> bool {
         return false;
     }
     let h = &head[..n];
-    // mp4 / m4a / mov：4 字节 box 长度 + "ftyp"
+    // mp4 / m4a / mov / 3gp：4 字节 box 长度 + "ftyp"
     if n >= 8 && &h[4..8] == b"ftyp" {
         return true;
     }
@@ -72,7 +74,27 @@ fn looks_like_media(path: &Path) -> bool {
         return true;
     }
     // flv
-    h.starts_with(b"FLV")
+    if h.starts_with(b"FLV") {
+        return true;
+    }
+    // MPEG-TS：同步字节 0x47，且每 188 字节重复（简化：只检查首字节）
+    if h[0] == 0x47 {
+        return true;
+    }
+    // ASF / WMV / WMA：GUID 75B22630-668E-11CF-A6D9-00AA0062CE6C
+    if n >= 16
+        && h[0] == 0x30
+        && h[1] == 0x26
+        && h[2] == 0xB2
+        && h[3] == 0x75
+        && h[4] == 0x8E
+        && h[5] == 0x66
+        && h[6] == 0xCF
+        && h[7] == 0x11
+    {
+        return true;
+    }
+    false
 }
 
 /// 找到下载目录里本次任务开始后写入的最新媒体文件（兜底 yt-dlp 没打印路径的情况）。
@@ -114,6 +136,62 @@ fn newest_media_since(dir: &Path, since: SystemTime) -> Option<PathBuf> {
     best.map(|(_, p)| p)
 }
 
+/// yt-dlp 报告的文件路径可能因文件名清洗与磁盘实际文件名不一致，
+/// 按文件名主体（去掉扩展名）在保存目录里模糊匹配最近修改的媒体文件。
+fn find_file_by_stem(dir: &Path, reported: &Path, since: SystemTime) -> Option<PathBuf> {
+    let stem = reported
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if stem.is_empty() {
+        return None;
+    }
+    let entries = fs::read_dir(dir).ok()?;
+    let mut best: Option<(SystemTime, PathBuf)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !MEDIA_EXTS.contains(&ext.as_str()) {
+            continue;
+        }
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        if !name.contains(&stem) && !stem.contains(&name) {
+            continue;
+        }
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.len() == 0 {
+            continue;
+        }
+        let modified = match meta.modified() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if modified + Duration::from_secs(2) < since {
+            continue;
+        }
+        if best.as_ref().map(|(t, _)| modified > *t).unwrap_or(true) {
+            best = Some((modified, path));
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
 fn tail_chars(text: &str, max: usize) -> String {
     let count = text.chars().count();
     if count <= max {
@@ -122,6 +200,34 @@ fn tail_chars(text: &str, max: usize) -> String {
     text.chars().skip(count - max).collect()
 }
 
+/// 把网络缩略图下载到本地缓存，返回 file:// URL，避免封面过期或防盗链导致无法显示。
+/// 下载失败时返回 None，调用方保留原 URL。
+async fn cache_thumbnail(app: &AppHandle, url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return None;
+    }
+    let cache_dir = app.path().app_cache_dir().ok()?.join("thumbnails");
+    std::fs::create_dir_all(&cache_dir).ok()?;
+    let ext = parsed
+        .path()
+        .rsplit('.')
+        .next()
+        .filter(|e| e.len() <= 5 && e.chars().all(|c| c.is_ascii_alphanumeric()))
+        .unwrap_or("jpg");
+    let name = format!("{}.{}", uuid::Uuid::new_v4(), ext);
+    let dest = cache_dir.join(&name);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .ok()?;
+    let bytes = client.get(url).send().await.ok()?.bytes().await.ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    std::fs::write(&dest, &bytes).ok()?;
+    Some(format!("file://{}", dest.to_string_lossy()))
+}
 
 fn open_with_system(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
@@ -318,6 +424,55 @@ pub async fn parse_media(state: State<'_, Mutex<AppStore>>, url: String) -> Resu
         });
     }
 
+    // 直接媒体链接（.mp4/.m3u8/...）：yt-dlp 的 -J 不一定能解析，直接构造 MediaInfo
+    if ytdlp::is_direct_media_url(&url) {
+        let filename = reqwest::Url::parse(&url)
+            .ok()
+            .and_then(|u| {
+                u.path_segments()
+                    .and_then(|seg| seg.last().map(|s| s.to_string()))
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "直接媒体链接".to_string());
+        let info = MediaInfo {
+            id: String::new(),
+            url: url.clone(),
+            title: filename,
+            thumbnail: None,
+            duration: None,
+            uploader: None,
+            site: Some("直链".into()),
+            formats: vec![
+                FormatOption {
+                    id: "best".into(),
+                    label: "最佳画质".into(),
+                    kind: "video".into(),
+                    selector: "bv*+ba/b".into(),
+                    audio_format: None,
+                    height: None,
+                    ext: Some("mp4".into()),
+                },
+                FormatOption {
+                    id: "audio-mp3".into(),
+                    label: "仅下载音频 MP3".into(),
+                    kind: "audio".into(),
+                    selector: "ba".into(),
+                    audio_format: Some("mp3".into()),
+                    height: None,
+                    ext: Some("mp3".into()),
+                },
+            ],
+        };
+        return Ok(ParseResult {
+            ok: true,
+            info: Some(info),
+            message: None,
+            detail: None,
+            needs_login: false,
+            browser_cookies: false,
+        });
+    }
+
     let mut base_args: Vec<String> = vec![
         "-J".into(), "--no-playlist".into(), "--no-warnings".into(),
         "--socket-timeout".into(), "20".into(),
@@ -336,7 +491,7 @@ pub async fn parse_media(state: State<'_, Mutex<AppStore>>, url: String) -> Resu
         } else if ytdlp::has_site_cookie_file(&url) {
             ytdlp::cookie_args_merged(&settings, &url)
         } else {
-            ytdlp::cookie_args_browser(&settings)
+            ytdlp::cookie_args_browser(&settings, &url)
         };
         let mut args = base_args.clone();
         args.extend(cookies.args.iter().cloned());
@@ -607,7 +762,7 @@ pub async fn start_download(
             let cookies = if use_browser && ytdlp::has_site_cookie_file(&download_url) {
                 ytdlp::cookie_args_merged(&settings, &download_url)
             } else if use_browser {
-                ytdlp::cookie_args_browser(&settings)
+                ytdlp::cookie_args_browser(&settings, &download_url)
             } else {
                 ytdlp::cookie_args(&settings, &download_url)
             };
@@ -621,7 +776,7 @@ pub async fn start_download(
                 "--user-agent".into(),
                 ytdlp::HONGGUO_USER_AGENT.into(),
                 "--add-header".into(),
-                format!("Referer:{}", ytdlp::HONGGUO_REFERER),
+                format!("Referer:{}", ytdlp::hongguo_referer(&download_url)),
             ];
             with_headers.extend(args);
             args = with_headers;
@@ -716,7 +871,12 @@ pub async fn start_download(
                                         t.total = total_bytes;
                                         t.speed = speed;
                                         t.eta = eta;
-                                        if stream_status != "finished" && progress > t.progress {
+                                        if stream_status == "finished" {
+                                            // 流已结束：把进度推到接近完成，避免 0→100 跳变
+                                            if t.progress < 99.5 {
+                                                t.progress = 99.5;
+                                            }
+                                        } else if progress > t.progress {
                                             t.progress = progress.min(99.5);
                                         }
                                     });
@@ -769,14 +929,27 @@ pub async fn start_download(
 
         match wait {
             Ok(status) if status.success() => {
+                let save_dir = Path::new(&task_clone.save_dir);
                 let found = final_reported
+                    .clone()
                     .filter(|p| p.is_file())
-                    .or_else(|| reported.filter(|p| p.is_file()))
-                    .or_else(|| newest_media_since(Path::new(&task_clone.save_dir), started));
+                    .or_else(|| reported.clone().filter(|p| p.is_file()))
+                    .or_else(|| {
+                        final_reported
+                            .as_ref()
+                            .and_then(|p| find_file_by_stem(save_dir, p, started))
+                    })
+                    .or_else(|| {
+                        reported
+                            .as_ref()
+                            .and_then(|p| find_file_by_stem(save_dir, p, started))
+                    })
+                    .or_else(|| newest_media_since(save_dir, started));
                 match found {
                     Some(path) if looks_like_media(&path) => {
                         let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                         let file_path = path.to_string_lossy().to_string();
+                        // 先标记完成，再异步缓存缩略图（不阻塞完成通知）
                         with_task(&state, &app2, &id2, |t| {
                             t.status = TaskStatus::Completed;
                             t.progress = 100.0;
@@ -789,6 +962,21 @@ pub async fn start_download(
                             }
                             t.file_path = Some(file_path);
                         });
+                        // 缓存缩略图到本地，避免封面 URL 过期或防盗链
+                        if let Some(thumb) = task_clone.thumbnail.clone() {
+                            let app3 = app2.clone();
+                            let id3 = id2.clone();
+                            tokio::spawn(async move {
+                                let Some(state3) = app3.try_state::<Mutex<AppStore>>() else {
+                                    return;
+                                };
+                                if let Some(local) = cache_thumbnail(&app3, &thumb).await {
+                                    with_task(&state3, &app3, &id3, |t| {
+                                        t.thumbnail = Some(local);
+                                    });
+                                }
+                            });
+                        }
                     }
                     Some(path) => {
                         let detail = format!(

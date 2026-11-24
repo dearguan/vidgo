@@ -28,7 +28,7 @@ const SNIFFER_SCRIPT: &str = r##"
   const dedupMs = 10000;
   const maxRecent = 512;
 
-  function normalizeMediaUrl(candidate) {
+  function normalizeMediaUrl(candidate, fromElement) {
     if (candidate == null) return null;
     if (typeof candidate !== 'string') {
       if (candidate instanceof URL) candidate = candidate.href;
@@ -48,15 +48,21 @@ const SNIFFER_SCRIPT: &str = r##"
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
 
     const pathname = parsed.pathname.toLowerCase();
-    if (/\.(?:png|jpe?g|gif|webp|avif|svg|ico|bmp|vtt|srt|ass|ssa|ts)$/.test(pathname)) {
+    // 图片 / 字幕 / 小切片一律排除
+    if (/\.(?:png|jpe?g|gif|webp|avif|svg|ico|bmp|vtt|srt|ass|ssa)$/.test(pathname)) {
       return null;
     }
-    if (!/\.(?:mp4|m3u8|mpd|webm|m4a|mp3)$/.test(pathname)) return null;
+    // 来自 <video>/<audio>/<source> 的 src 一定是媒体，放宽扩展名要求
+    if (fromElement) {
+      return parsed.href;
+    }
+    // fetch / XHR / performance 入口仍按扩展名过滤，避免把页面资源全收进来
+    if (!/\.(?:mp4|m3u8|mpd|webm|m4a|mp3|m4s|ts|flv|mov|mkv|aac|ogg|3gp|asf|wmv)$/.test(pathname)) return null;
     return parsed.href;
   }
 
-  function report(candidate) {
-    const url = normalizeMediaUrl(candidate);
+  function report(candidate, fromElement) {
+    const url = normalizeMediaUrl(candidate, fromElement);
     if (!url) return;
     if (!window.__TAURI__ || !window.__TAURI__.core ||
         typeof window.__TAURI__.core.invoke !== 'function') return;
@@ -89,9 +95,9 @@ const SNIFFER_SCRIPT: &str = r##"
 
   function inspectMediaElement(element) {
     if (!element) return;
-    report(element.currentSrc);
-    report(element.src);
-    if (typeof element.getAttribute === 'function') report(element.getAttribute('src'));
+    report(element.currentSrc, true);
+    report(element.src, true);
+    if (typeof element.getAttribute === 'function') report(element.getAttribute('src'), true);
   }
 
   function scanTree(root) {
@@ -161,6 +167,29 @@ const SNIFFER_SCRIPT: &str = r##"
       return originalOpen.apply(this, arguments);
     };
   }
+})();
+
+// ---------- 导航拦截：把新窗口 / target=_blank 转到当前窗口 ----------
+(() => {
+  if (window.top !== window) return;
+  // 覆盖 window.open：在当前窗口打开，不弹新窗口
+  try {
+    window.open = function (url) {
+      if (url) location.href = url;
+      return null;
+    };
+  } catch (_) {}
+  // 捕获所有 <a target="_blank"> 点击，改为当前窗口跳转
+  document.addEventListener('click', (event) => {
+    const link = event.target.closest && event.target.closest('a[target]');
+    if (link && link.href) {
+      const href = link.getAttribute('href') || '';
+      if (href && !href.startsWith('#') && !href.startsWith('javascript:')) {
+        event.preventDefault();
+        location.href = link.href;
+      }
+    }
+  }, true);
 })();
 
 // ---------- Vidgo 媒体侧栏（仅顶层页面） ----------
@@ -801,14 +830,25 @@ fn parse_media_url(raw: &str) -> Result<(Url, &'static str), String> {
 
 fn classify_media_type(url: &Url) -> Option<&'static str> {
     let pathname = url.path().to_ascii_lowercase();
-    let extension = pathname.rsplit_once('.')?.1;
+    let extension = pathname.rsplit_once('.').map(|(_, ext)| ext);
     match extension {
-        "mp4" => Some("mp4"),
-        "m3u8" => Some("hls"),
-        "mpd" => Some("dash"),
-        "webm" => Some("webm"),
-        "m4a" => Some("m4a"),
-        "mp3" => Some("mp3"),
+        Some("mp4") => Some("mp4"),
+        Some("m3u8") => Some("hls"),
+        Some("mpd") => Some("dash"),
+        Some("webm") => Some("webm"),
+        Some("m4a") => Some("m4a"),
+        Some("mp3") => Some("mp3"),
+        Some("flv") => Some("flv"),
+        Some("mov") => Some("mov"),
+        Some("mkv") => Some("mkv"),
+        Some("m4s") => Some("mp4"),
+        Some("ts") => Some("mp4"),
+        Some("3gp") => Some("mp4"),
+        Some("aac") => Some("m4a"),
+        Some("ogg") => Some("mp3"),
+        Some("asf") | Some("wmv") => Some("mp4"),
+        // 无扩展名（多见于 <video src> 直链）：默认按 mp4 处理，让 yt-dlp 自己判断
+        None => Some("mp4"),
         _ => None,
     }
 }
@@ -888,11 +928,8 @@ mod tests {
     #[test]
     fn filters_non_media_images_subtitles_segments_and_non_http_urls() {
         let rejected = [
-            "https://example.com/a.ts?part=1",
-            "https://example.com/a.mp4.ts",
             "https://example.com/poster.jpg?x=.mp4",
             "https://example.com/subtitle.vtt?x=.m3u8",
-            "https://example.com/video?format=mp4",
             "https://example.com/video.mp4/extra",
             "blob:https://example.com/id.mp4",
             "data:video/mp4;base64,AAAA",
@@ -900,6 +937,19 @@ mod tests {
         ];
         for raw in rejected {
             assert!(parse_media_url(raw).is_err(), "不应接受: {raw}");
+        }
+    }
+
+    #[test]
+    fn accepts_new_media_extensions_and_extensionless_urls() {
+        let accepted = [
+            "https://example.com/a.ts?part=1",
+            "https://example.com/a.mp4.ts",
+            "https://example.com/video?format=mp4",
+            "https://example.com/stream/12345",
+        ];
+        for raw in accepted {
+            assert!(parse_media_url(raw).is_ok(), "应接受: {raw}");
         }
     }
 

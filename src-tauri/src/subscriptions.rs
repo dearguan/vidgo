@@ -169,7 +169,7 @@ pub fn fetch_flat_playlist(
         } else if crate::ytdlp::has_site_cookie_file(&url) {
             crate::ytdlp::cookie_args_merged(settings, &url)
         } else {
-            crate::ytdlp::cookie_args_browser(settings)
+            crate::ytdlp::cookie_args_browser(settings, &url)
         };
         let mut command = Command::new(crate::ytdlp::ytdlp_path());
         crate::ytdlp::hide_console(&mut command);

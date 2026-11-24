@@ -132,9 +132,23 @@ pub struct HongguoMedia {
 
 pub fn is_hongguo_url(url: &str) -> bool {
     reqwest::Url::parse(url).ok().is_some_and(|u| {
-        u.host_str()
-            .is_some_and(|host| host == "novelquickapp.com" || host.ends_with(".novelquickapp.com"))
+        u.host_str().is_some_and(|host| {
+            host == "novelquickapp.com"
+                || host.ends_with(".novelquickapp.com")
+                || host == "hainanyuyue.com"
+                || host.ends_with(".hainanyuyue.com")
+                || host == "kylin.hainanyuyue.com"
+        })
     })
+}
+
+/// 根据链接域名取对应的 Referer（红果 / 番茄系分享页要求同站 Referer）
+pub fn hongguo_referer(url: &str) -> &'static str {
+    if url.contains("hainanyuyue.com") {
+        "https://hainanyuyue.com/"
+    } else {
+        HONGGUO_REFERER
+    }
 }
 
 /// 红果分享页本身不被 yt-dlp 支持，但页面 pageData 中带有公开的 MP4 地址。
@@ -150,7 +164,7 @@ pub async fn resolve_hongguo(url: &str, proxy: &str) -> Result<HongguoMedia, Str
         .build()
         .map_err(|e| e.to_string())?
         .get(url)
-        .header(reqwest::header::REFERER, HONGGUO_REFERER)
+        .header(reqwest::header::REFERER, hongguo_referer(url))
         .send()
         .await
         .map_err(|e| format!("请求红果分享页失败：{e}"))?
@@ -717,8 +731,15 @@ pub fn cookie_args(_settings: &crate::store::Settings, target_url: &str) -> Cook
     CookieArgs { args, temp }
 }
 
-/// 只使用系统浏览器 Cookie（站点没有内置登录时，作为登录兜底）
-pub fn cookie_args_browser(settings: &crate::store::Settings) -> CookieArgs {
+/// 只使用系统浏览器 Cookie（站点没有内置登录时，作为登录兜底）。
+/// 直接媒体 URL 不需要 Cookie，跳过可避免系统浏览器 Cookie 数据库读取失败。
+pub fn cookie_args_browser(settings: &crate::store::Settings, target_url: &str) -> CookieArgs {
+    if is_direct_media_url(target_url) {
+        return CookieArgs {
+            args: Vec::new(),
+            temp: None,
+        };
+    }
     match browser_cookie_source(&settings.cookies_from_browser) {
         Some(browser) => CookieArgs {
             args: vec!["--cookies-from-browser".into(), browser.to_string()],
@@ -1043,14 +1064,22 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            cookie_args_browser(&settings).args,
+            cookie_args_browser(&settings, "https://www.bilibili.com/video/BV1").args,
             vec!["--cookies-from-browser".to_string(), "edge".to_string()]
         );
         let settings = crate::store::Settings {
             cookies_from_browser: "auto".into(),
             ..Default::default()
         };
-        assert!(cookie_args_browser(&settings).args.is_empty());
+        assert!(cookie_args_browser(&settings, "https://www.bilibili.com/video/BV1")
+            .args
+            .is_empty());
+        // 直接媒体 URL 不使用系统浏览器 Cookie
+        let settings = crate::store::Settings {
+            cookies_from_browser: "edge".into(),
+            ..Default::default()
+        };
+        assert!(cookie_args_browser(&settings, "https://cdn.example.com/a.mp4").args.is_empty());
     }
 
     #[test]

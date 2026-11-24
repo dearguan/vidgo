@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactElement, type ReactNode } from 'react'
-import type { AppInfo, DownloadTask, Settings, SiteLogin, SniffedMedia, UpdateInfo, UpdateProgress } from '../../shared/types'
+import type { AppInfo, DownloadTask, FormatOption, Settings, SiteLogin, SniffedMedia, UpdateInfo, UpdateProgress } from '../../shared/types'
 import type { View } from './utils'
 import { api } from './api'
 
@@ -209,8 +209,31 @@ export function AppProvider({ children }: { children: ReactNode }): ReactElement
   // 侧栏「添加」与「完成登录」都在主窗口处理
   useEffect(() => {
     const offEnqueue = api.onSnifferEnqueue?.((media) => {
-      requestParse(media.url)
-      notify(`已加入下载列表：${media.title || media.url}`)
+      const directTypes: SniffedMedia['type'][] = ['mp4', 'webm', 'hls', 'dash', 'm4a', 'mp3']
+      if (directTypes.includes(media.type)) {
+        // 已捕获的直链媒体（mp4/m3u8/...）直接入队下载，不再走解析流程
+        const option: FormatOption = {
+          id: 'best',
+          label: '最佳画质',
+          kind: 'video',
+          selector: 'bv*+ba/b'
+        }
+        void api
+          .startDownload({
+            url: media.url,
+            title: media.title || media.url,
+            thumbnail: undefined,
+            duration: undefined,
+            option,
+            saveDir: settings?.saveDir ?? '',
+            browserCookies: false
+          })
+          .then(() => notify('已加入下载队列'))
+          .catch((e) => notify(e instanceof Error ? e.message : String(e), 'err'))
+      } else {
+        requestParse(media.url)
+        notify(`已加入下载列表：${media.title || media.url}`)
+      }
     })
     const offLogin = api.onBrowserLoginDone?.(() => {
       void refreshSiteLogins()
@@ -230,7 +253,7 @@ export function AppProvider({ children }: { children: ReactNode }): ReactElement
       offEnqueue?.()
       offLogin?.()
     }
-  }, [requestParse, notify, refreshSiteLogins])
+  }, [requestParse, notify, refreshSiteLogins, settings])
 
   const taskAction = useCallback((action: TaskAction, id: string, deleteFile = false) => {
     const map: Record<TaskAction, (id: string) => Promise<unknown>> = {
