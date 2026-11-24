@@ -31,7 +31,7 @@ export interface MediaInfo {
 }
 
 export type ParseResult =
-  | { ok: true; info: MediaInfo; needsLogin?: boolean }
+  | { ok: true; info: MediaInfo; needsLogin?: boolean; browserCookies?: boolean }
   | { ok: false; message: string; detail?: string; needsLogin?: boolean }
 
 export interface DownloadTask {
@@ -56,6 +56,7 @@ export interface DownloadTask {
   error?: string
   errorDetail?: string
   needsLogin?: boolean
+  browserCookies?: boolean
   filePath?: string
   createdAt: number
   completedAt?: number
@@ -107,6 +108,8 @@ export interface SniffedMedia {
 export interface Settings {
   saveDir: string
   proxy: string
+  /** 国内视频站点直连，不走代理 */
+  directCn: boolean
   /** 读取系统浏览器 Cookie 直接传给 yt-dlp；none 表示不读 */
   cookieBrowser: 'auto' | 'chrome' | 'edge' | 'firefox' | 'brave' | 'safari' | 'vivaldi' | 'opera' | 'none'
   concurrency: number
@@ -166,6 +169,8 @@ export interface StartDownloadPayload {
   duration?: number
   option: FormatOption
   saveDir: string
+  /** 解析时是否需要合并系统浏览器 Cookie（站点登录不完整时） */
+  browserCookies?: boolean
 }
 
 export interface AppInfo {

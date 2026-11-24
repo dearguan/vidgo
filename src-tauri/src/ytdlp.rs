@@ -115,6 +115,9 @@ pub struct ParseResult {
     /// 失败原因是否是「需要登录 / Cookie」，前端据此显示「去登录」
     #[serde(default)]
     pub needs_login: bool,
+    /// 解析时是否合并了系统浏览器 Cookie（下载时需要沿用同样的来源）
+    #[serde(default)]
+    pub browser_cookies: bool,
 }
 
 pub const HONGGUO_USER_AGENT: &str =
@@ -259,7 +262,120 @@ fn parse_hongguo_html(html: &str, source_url: &str) -> Result<HongguoMedia, Stri
 /// 站点 Cookie 目录：每个域名一个 Netscape 格式文件（由内置浏览器导出）
 pub fn cookies_dir() -> PathBuf {
     let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-    base.join("Vidgo").join("cookies")
+    base.join("Vidgo").join("site-cookies")
+}
+
+/// 0.4.9 曾把 Cookie 放在 `Vidgo/cookies`；该名字在 macOS 会与 WebView 的
+/// `Cookies` 数据库文件冲突，迁移到 `Vidgo/site-cookies`。
+pub fn migrate_cookies_dir() {
+    let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
+    let old = base.join("Vidgo").join("cookies");
+    let new = cookies_dir();
+    if old.is_dir() && !new.exists() {
+        let _ = std::fs::rename(&old, &new);
+    }
+}
+
+/// 国内视频站点：直连可避免代理节点导致的地区限制 / Cookie 校验失败
+pub fn is_domestic_site(url: &str) -> bool {
+    const DOMAINS: [&str; 22] = [
+        "douyin.com",
+        "douyinvod.com",
+        "douyinstatic.com",
+        "ixigua.com",
+        "bilibili.com",
+        "b23.tv",
+        "hdslb.com",
+        "kuaishou.com",
+        "xiaohongshu.com",
+        "xhslink.com",
+        "weibo.com",
+        "weibo.cn",
+        "qq.com",
+        "iqiyi.com",
+        "youku.com",
+        "mgtv.com",
+        "sohu.com",
+        "163.com",
+        "novelquickapp.com",
+        "qznovel.com",
+        "huya.com",
+        "douyu.com",
+    ];
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    let host = host.to_ascii_lowercase();
+    DOMAINS
+        .iter()
+        .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+}
+
+/// 实际传给 yt-dlp / 内置浏览器的代理：国内站点按设置直连
+pub fn effective_proxy(settings: &crate::store::Settings, url: &str) -> String {
+    let proxy = settings.proxy.trim();
+    if proxy.is_empty() {
+        return String::new();
+    }
+    if settings.direct_cn && is_domestic_site(url) {
+        return String::new();
+    }
+    proxy.to_string()
+}
+
+/// 清洗用户粘贴的链接：去掉首尾文字 / 引号，解码 `&amp;` 之类的 HTML 实体。
+pub fn sanitize_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let start = trimmed.find("https://").or_else(|| trimmed.find("http://"))?;
+    let tail = &trimmed[start..];
+    let end = tail.find(char::is_whitespace).unwrap_or(tail.len());
+    let candidate = tail[..end]
+        .trim_end_matches(['"', '\'', '>', '。', '，', ')', '）', ']', '}']);
+    let decoded = html_escape::decode_html_entities(candidate).into_owned();
+    let parsed = reqwest::Url::parse(&decoded).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return None;
+    }
+    Some(parsed.to_string())
+}
+
+/// 抖音个人主页/发现页上的 `vid` / `modal_id` 参数可直接还原成视频链接，
+/// 否则 yt-dlp 会报 Unsupported URL。
+pub fn canonicalize_url(raw: &str) -> String {
+    let Some(sanitized) = sanitize_url(raw) else {
+        return raw.trim().to_string();
+    };
+    let Ok(parsed) = reqwest::Url::parse(&sanitized) else {
+        return sanitized;
+    };
+    let host = parsed
+        .host_str()
+        .unwrap_or_default()
+        .trim_start_matches("www.")
+        .to_ascii_lowercase();
+    if host == "douyin.com" && (parsed.path().contains("/user/") || parsed.path().starts_with("/discover")) {
+        let vid = parsed
+            .query_pairs()
+            .find(|(key, _)| key == "vid" || key == "modal_id")
+            .map(|(_, value)| value.into_owned())
+            .filter(|value| !value.is_empty() && value.chars().all(|c| c.is_ascii_digit()));
+        if let Some(vid) = vid {
+            return format!("https://www.douyin.com/video/{vid}");
+        }
+    }
+    sanitized
+}
+
+/// 抖音个人主页不是 yt-dlp 支持的订阅源
+pub fn is_douyin_user_page(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
+    (host == "douyin.com" || host.ends_with(".douyin.com")) && parsed.path().starts_with("/user/")
 }
 
 /// 站点登录信息（设置页展示用）
@@ -386,6 +502,33 @@ fn browser_cookie_source(value: &str) -> Option<&'static str> {
     BROWSERS.iter().find(|name| **name == lower).copied()
 }
 
+/// 该链接是否有已保存的站点登录文件
+pub fn has_site_cookie_file(target_url: &str) -> bool {
+    cookie_file_for_url(target_url).is_some()
+}
+
+/// 是否配置了可从系统浏览器读取 Cookie
+pub fn has_browser_cookie_source(settings: &crate::store::Settings) -> bool {
+    browser_cookie_source(&settings.cookies_from_browser).is_some()
+}
+
+fn site_cookie_file_args(target_url: &str) -> (Vec<String>, Option<PathBuf>) {
+    let Some(path) = cookie_file_for_url(target_url) else {
+        return (Vec::new(), None);
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return (Vec::new(), None);
+    };
+    let temp = std::env::temp_dir().join(format!("vidgo-cookies-{}.txt", uuid::Uuid::new_v4()));
+    if std::fs::write(&temp, bytes).is_err() {
+        return (Vec::new(), None);
+    }
+    (
+        vec!["--cookies".into(), temp.to_string_lossy().to_string()],
+        Some(temp),
+    )
+}
+
 /// 优先使用该站点已保存的登录 Cookie，其次回退系统浏览器。
 pub fn cookie_args(settings: &crate::store::Settings, target_url: &str) -> CookieArgs {
     if is_direct_media_url(target_url) {
@@ -394,17 +537,9 @@ pub fn cookie_args(settings: &crate::store::Settings, target_url: &str) -> Cooki
             temp: None,
         };
     }
-    if let Some(path) = cookie_file_for_url(target_url) {
-        if let Ok(bytes) = std::fs::read(&path) {
-            let temp =
-                std::env::temp_dir().join(format!("vidgo-cookies-{}.txt", uuid::Uuid::new_v4()));
-            if std::fs::write(&temp, bytes).is_ok() {
-                return CookieArgs {
-                    args: vec!["--cookies".into(), temp.to_string_lossy().to_string()],
-                    temp: Some(temp),
-                };
-            }
-        }
+    let (args, temp) = site_cookie_file_args(target_url);
+    if temp.is_some() {
+        return CookieArgs { args, temp };
     }
     if let Some(browser) = browser_cookie_source(&settings.cookies_from_browser) {
         return CookieArgs {
@@ -416,6 +551,23 @@ pub fn cookie_args(settings: &crate::store::Settings, target_url: &str) -> Cooki
         args: Vec::new(),
         temp: None,
     }
+}
+
+/// 同时使用站点 Cookie 与系统浏览器 Cookie（yt-dlp 会合并两个来源）。
+/// 站点登录不完整（例如抖音缺少 s_v_web_id）时作为兜底。
+pub fn cookie_args_merged(settings: &crate::store::Settings, target_url: &str) -> CookieArgs {
+    if is_direct_media_url(target_url) {
+        return CookieArgs {
+            args: Vec::new(),
+            temp: None,
+        };
+    }
+    let (mut args, temp) = site_cookie_file_args(target_url);
+    if let Some(browser) = browser_cookie_source(&settings.cookies_from_browser) {
+        args.push("--cookies-from-browser".into());
+        args.push(browser.to_string());
+    }
+    CookieArgs { args, temp }
 }
 
 fn normalized_domain(raw: &str) -> Result<String, String> {
@@ -488,6 +640,25 @@ pub fn list_site_logins() -> Vec<SiteLogin> {
         .collect();
     logins.sort_by_key(|a| std::cmp::Reverse(a.saved_at));
     logins
+}
+
+/// 查询某个链接会用到哪个站点的登录信息
+pub fn site_login_for(url: &str) -> Option<SiteLogin> {
+    let path = cookie_file_for_url(url)?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    let meta = std::fs::metadata(&path).ok();
+    let saved_at = meta
+        .as_ref()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    Some(SiteLogin {
+        domain: path.file_stem()?.to_str()?.to_string(),
+        cookie_count: u32::try_from(count_cookie_lines(&text)).unwrap_or(u32::MAX),
+        saved_at,
+        size: meta.map(|m| m.len()).unwrap_or(0),
+    })
 }
 
 pub fn delete_site_login(domain: &str) -> Result<(), String> {
@@ -608,6 +779,56 @@ mod tests {
         assert_eq!(browser_cookie_source("auto"), None);
         assert_eq!(browser_cookie_source("none"), None);
         assert_eq!(browser_cookie_source(""), None);
+    }
+
+    #[test]
+    fn sanitizes_pasted_links_and_decodes_html_entities() {
+        assert_eq!(
+            sanitize_url("看看这个 https://v.douyin.com/abc/ 很好").as_deref(),
+            Some("https://v.douyin.com/abc/")
+        );
+        assert_eq!(
+            sanitize_url(
+                "https://www.douyin.com/user/MS4?from_tab_name=main&amp;vid=7680497115004505396"
+            )
+            .as_deref(),
+            Some("https://www.douyin.com/user/MS4?from_tab_name=main&vid=7680497115004505396")
+        );
+        assert_eq!(sanitize_url("没有链接"), None);
+    }
+
+    #[test]
+    fn rewrites_douyin_video_params_to_canonical_url() {
+        assert_eq!(
+            canonicalize_url(
+                "https://www.douyin.com/user/MS4?from_tab_name=main&amp;vid=7680497115004505396"
+            ),
+            "https://www.douyin.com/video/7680497115004505396"
+        );
+        assert_eq!(
+            canonicalize_url("https://www.douyin.com/discover?modal_id=123"),
+            "https://www.douyin.com/video/123"
+        );
+        assert!(is_douyin_user_page("https://www.douyin.com/user/MS4"));
+        assert!(!is_douyin_user_page("https://www.douyin.com/video/123"));
+    }
+
+    #[test]
+    fn domestic_sites_skip_proxy() {
+        let mut settings = crate::store::Settings {
+            proxy: "http://127.0.0.1:7880".into(),
+            ..Default::default()
+        };
+        assert_eq!(effective_proxy(&settings, "https://v.douyin.com/x/"), "");
+        assert_eq!(
+            effective_proxy(&settings, "https://www.youtube.com/watch?v=1"),
+            "http://127.0.0.1:7880"
+        );
+        settings.direct_cn = false;
+        assert_eq!(
+            effective_proxy(&settings, "https://v.douyin.com/x/"),
+            "http://127.0.0.1:7880"
+        );
     }
 
     #[test]

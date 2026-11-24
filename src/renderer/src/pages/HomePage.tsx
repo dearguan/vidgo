@@ -24,6 +24,7 @@ export function HomePage(): ReactElement {
   const [parsing, setParsing] = useState(false)
   const [slowParse, setSlowParse] = useState(false)
   const [parseError, setParseError] = useState<{ message: string; detail?: string; needsLogin?: boolean } | null>(null)
+  const [browserCookies, setBrowserCookies] = useState(false)
   const [showDetail, setShowDetail] = useState(false)
   const [clipHint, setClipHint] = useState('')
   const [urlInvalid, setUrlInvalid] = useState(false)
@@ -76,10 +77,12 @@ export function HomePage(): ReactElement {
       if (id !== seq.current) return
       if (result.ok) {
         setMedia(result.info)
+        setBrowserCookies(Boolean(result.browserCookies))
         setFormatId(result.info.formats.find((f) => f.kind === 'video')?.id ?? '')
         setAudioId(result.info.formats.find((f) => f.kind === 'audio')?.id ?? '')
         setAudioOnly(false)
       } else if (result.message !== '已取消解析') {
+        setBrowserCookies(false)
         setParseError({ message: result.message, detail: result.detail, needsLogin: result.needsLogin })
       }
     } catch (e) {
@@ -131,7 +134,8 @@ export function HomePage(): ReactElement {
         thumbnail: media.thumbnail,
         duration: media.duration,
         option: selected,
-        saveDir: settings.saveDir
+        saveDir: settings.saveDir,
+        browserCookies
       })
       notify('已加入下载队列')
       setMedia(null)

@@ -254,6 +254,20 @@ export function SettingsPage(): ReactElement {
             }}
           />
         </Row>
+        <Row
+          label="国内站点直连"
+          hint="抖音、B 站、快手、小红书等国内站点不走代理，避免代理节点导致地区限制或 Cookie 失效；内置浏览器同样按此规则切换"
+        >
+          <button
+            role="switch"
+            aria-checked={settings.directCn}
+            aria-label="国内站点直连"
+            className={`switch ${settings.directCn ? 'on' : ''}`}
+            onClick={() => patch({ directCn: !settings.directCn })}
+          >
+            <span className="switch-dot" />
+          </button>
+        </Row>
       </Group>
 
       <Group title="版本与更新">

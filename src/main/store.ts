@@ -19,6 +19,7 @@ export class Store {
       settings: {
         saveDir: path.join(app.getPath('downloads'), 'Vidgo'),
         proxy: '',
+        directCn: true,
         cookieBrowser: 'auto',
         concurrency: 3,
         theme: 'system',

@@ -260,14 +260,27 @@ pub async fn parse_media(state: State<'_, Mutex<AppStore>>, url: String) -> Resu
         s.data.settings.clone()
     };
 
+    let Some(url) = ytdlp::sanitize_url(&url) else {
+        return Ok(ParseResult {
+            ok: false,
+            info: None,
+            message: Some("链接无效：请粘贴完整的 http/https 地址。".into()),
+            detail: None,
+            needs_login: false,
+            browser_cookies: false,
+        });
+    };
+    let url = ytdlp::canonicalize_url(&url);
+
     if ytdlp::is_hongguo_url(&url) {
-        return Ok(match ytdlp::resolve_hongguo(&url, &settings.proxy).await {
+        return Ok(match ytdlp::resolve_hongguo(&url, &ytdlp::effective_proxy(&settings, &url)).await {
             Ok(media) => ParseResult {
                 ok: true,
                 info: Some(media.info),
                 message: None,
                 detail: None,
                 needs_login: false,
+                browser_cookies: false,
             },
             Err(e) => ParseResult {
                 ok: false,
@@ -275,64 +288,99 @@ pub async fn parse_media(state: State<'_, Mutex<AppStore>>, url: String) -> Resu
                 message: Some("红果视频解析失败，请确认链接有效或稍后重试。".into()),
                 detail: Some(e),
                 needs_login: false,
+                browser_cookies: false,
             },
         });
     }
 
-    let mut args: Vec<String> = vec![
+    let mut base_args: Vec<String> = vec![
         "-J".into(), "--no-playlist".into(), "--no-warnings".into(),
         "--socket-timeout".into(), "20".into(),
     ];
-    if !settings.proxy.is_empty() {
-        args.push("--proxy".into());
-        args.push(settings.proxy.clone());
+    let proxy = ytdlp::effective_proxy(&settings, &url);
+    if !proxy.is_empty() {
+        base_args.push("--proxy".into());
+        base_args.push(proxy);
     }
-    // 该站点已保存的登录 Cookie 优先，其次系统浏览器；临时文件在此作用域结束时删除
-    let cookies = ytdlp::cookie_args(&settings, &url);
-    args.extend(cookies.args.iter().cloned());
-    args.push(url.clone());
 
-    let mut command = std::process::Command::new(ytdlp_path());
-    ytdlp::hide_console(&mut command);
-    let output = match command.args(&args).output() {
-        Ok(o) => o,
-        Err(e) => {
-            return Ok(ParseResult {
-                ok: false,
-                info: None,
-                message: Some(format!("无法启动解析引擎：{}", e)),
-                detail: Some(e.to_string()),
-                needs_login: false,
+    // 先只用站点登录 Cookie；若站点 Cookie 不足以通过校验，再合并系统浏览器 Cookie 重试一次
+    let mut attempt = 0usize;
+    let (needs_login, mut message, detail) = loop {
+        let cookies = if attempt == 0 {
+            ytdlp::cookie_args(&settings, &url)
+        } else {
+            ytdlp::cookie_args_merged(&settings, &url)
+        };
+        let mut args = base_args.clone();
+        args.extend(cookies.args.iter().cloned());
+        args.push(url.clone());
+
+        let mut command = std::process::Command::new(ytdlp_path());
+        ytdlp::hide_console(&mut command);
+        let output = match command.args(&args).output() {
+            Ok(o) => o,
+            Err(e) => {
+                return Ok(ParseResult {
+                    ok: false,
+                    info: None,
+                    message: Some(format!("无法启动解析引擎：{}", e)),
+                    detail: Some(e.to_string()),
+                    needs_login: false,
+                    browser_cookies: false,
+                });
+            }
+        };
+
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            return Ok(match parse_json(&stdout, &url) {
+                Ok(info) => ParseResult {
+                    ok: true,
+                    info: Some(info),
+                    message: None,
+                    detail: None,
+                    needs_login: false,
+                    browser_cookies: attempt > 0,
+                },
+                Err(e) => ParseResult {
+                    ok: false, info: None,
+                    message: Some("解析结果异常，请稍后重试。".into()),
+                    detail: Some(e.to_string()),
+                    needs_login: false,
+                    browser_cookies: false,
+                },
             });
         }
+
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let cookie_related = needs_login_error(&stderr);
+        let can_merge = attempt == 0
+            && cookie_related
+            && ytdlp::has_site_cookie_file(&url)
+            && ytdlp::has_browser_cookie_source(&settings);
+        if !can_merge {
+            break (cookie_related, humanize_err(&stderr), stderr);
+        }
+        attempt = 1;
     };
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        return Ok(ParseResult {
-            ok: false,
-            info: None,
-            message: Some(humanize_err(&stderr)),
-            needs_login: needs_login_error(&stderr),
-            detail: Some(stderr),
-        });
+    if let Some(login) = ytdlp::site_login_for(&url) {
+        if needs_login {
+            message = format!(
+                "{message} 已尝试 {} 的 {} 个 Cookie{}，仍被站点拒绝，请在设置中「重新登录」该站点。",
+                login.domain,
+                login.cookie_count,
+                if attempt > 0 { "与系统浏览器 Cookie" } else { "" }
+            );
+        }
     }
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    Ok(match parse_json(&stdout, &url) {
-        Ok(info) => ParseResult {
-            ok: true,
-            info: Some(info),
-            message: None,
-            detail: None,
-            needs_login: false,
-        },
-        Err(e) => ParseResult {
-            ok: false, info: None,
-            message: Some("解析结果异常，请稍后重试。".into()),
-            detail: Some(e.to_string()),
-            needs_login: false,
-        },
+    Ok(ParseResult {
+        ok: false,
+        info: None,
+        message: Some(message),
+        needs_login,
+        detail: Some(detail),
+        browser_cookies: false,
     })
 }
 
@@ -437,6 +485,9 @@ pub async fn parse_cancel() -> Result<(), String> { Ok(()) }
 pub struct StartDownloadPayload {
     pub url: String, pub title: String, pub thumbnail: Option<String>,
     pub duration: Option<f64>, pub save_dir: String, pub option: FormatOption,
+    /// 解析时合并了系统浏览器 Cookie，下载时沿用
+    #[serde(default)]
+    pub browser_cookies: bool,
 }
 
 #[tauri::command]
@@ -454,6 +505,7 @@ pub async fn start_download(
         status: TaskStatus::Waiting, progress: 0.0, downloaded: 0, total: 0,
         speed: 0.0, eta: None, error: None, error_detail: None,
         needs_login: false,
+        browser_cookies: payload.browser_cookies,
         file_path: None, completed_at: None, created_at: now_ms(),
     };
 
@@ -487,9 +539,9 @@ pub async fn start_download(
         }
 
         let is_hongguo = ytdlp::is_hongguo_url(&task_clone.url);
-        let mut download_url = task_clone.url.clone();
+        let mut download_url = ytdlp::canonicalize_url(&task_clone.url);
         if is_hongguo {
-            match ytdlp::resolve_hongguo(&task_clone.url, &settings.proxy).await {
+            match ytdlp::resolve_hongguo(&download_url, &ytdlp::effective_proxy(&settings, &download_url)).await {
                 Ok(media) => download_url = media.play_url,
                 Err(e) => {
                     let mut s = state.inner().lock().unwrap();
@@ -504,10 +556,14 @@ pub async fn start_download(
                 }
             }
         }
-        let cookies = ytdlp::cookie_args(&settings, &download_url);
+        let cookies = if task_clone.browser_cookies {
+            ytdlp::cookie_args_merged(&settings, &download_url)
+        } else {
+            ytdlp::cookie_args(&settings, &download_url)
+        };
         let mut args = ytdlp::build_download_args(
             &download_url, &task_clone.selector, &task_clone.save_dir,
-            &settings.proxy, &cookies.args,
+            &ytdlp::effective_proxy(&settings, &download_url), &cookies.args,
             task_clone.audio_format.as_deref(), task_clone.height,
         );
         if is_hongguo {
@@ -802,6 +858,7 @@ pub async fn redownload_task(
             let payload = StartDownloadPayload {
                 url: o.url.clone(), title: o.title.clone(), thumbnail: o.thumbnail.clone(),
                 duration: o.duration, save_dir: o.save_dir.clone(),
+                browser_cookies: o.browser_cookies,
                 option: FormatOption {
                     id: o.format_id.clone(), label: o.format_label.clone(),
                     kind: o.kind.clone(), selector: o.selector.clone(),
@@ -1014,11 +1071,7 @@ pub async fn check_subscription(
         };
         let url = subscription.url.clone();
         let fetched = tauri::async_runtime::spawn_blocking(move || {
-            crate::subscriptions::fetch_flat_playlist(
-                &url,
-                &settings.proxy,
-                &settings,
-            )
+            crate::subscriptions::fetch_flat_playlist(&url, &settings)
         })
         .await
         .map_err(|e| e.to_string())??;

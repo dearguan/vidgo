@@ -25,6 +25,9 @@ pub struct Settings {
     pub github_token: String,
     #[serde(default = "default_report_repo")]
     pub report_repo: String,
+    /// 国内视频站点直连，不走代理（避免代理节点导致抖音等站点拒绝访问）
+    #[serde(default = "default_true")]
+    pub direct_cn: bool,
 }
 
 fn default_report_repo() -> String {
@@ -59,6 +62,7 @@ impl Default for Settings {
             cookies_from_browser: String::new(),
             github_token: String::new(),
             report_repo: default_report_repo(),
+            direct_cn: true,
         }
     }
 }
@@ -101,6 +105,9 @@ pub struct DownloadTask {
     /// 失败原因是否需要登录（前端显示「去登录」）
     #[serde(default)]
     pub needs_login: bool,
+    /// 解析时合并了系统浏览器 Cookie，下载时沿用
+    #[serde(default)]
+    pub browser_cookies: bool,
     #[serde(default)]
     pub file_path: Option<String>,
     #[serde(default)]

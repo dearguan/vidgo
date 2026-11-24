@@ -83,6 +83,7 @@ fn render_body(
     cookie_browser: &str,
     ytdlp: &str,
     recent_failures: &[String],
+    site_logins: &[crate::ytdlp::SiteLogin],
     created_at: i64,
 ) -> String {
     let mut body = String::new();
@@ -106,13 +107,23 @@ fn render_body(
         }
     ));
     body.push_str(&format!(
-        "- **yt-dlp**：{}\n\n",
+        "- **yt-dlp**：{}\n",
         if ytdlp.trim().is_empty() {
             "未知"
         } else {
             ytdlp
         }
     ));
+    if site_logins.is_empty() {
+        body.push_str("- **站点登录**：无\n\n");
+    } else {
+        let items = site_logins
+            .iter()
+            .map(|login| format!("{}（{} 个 Cookie）", login.domain, login.cookie_count))
+            .collect::<Vec<_>>()
+            .join("、");
+        body.push_str(&format!("- **站点登录**：{items}\n\n"));
+    }
 
     body.push_str("#### 标题\n\n");
     body.push_str(&format!("{}\n\n", one_line(&input.title, 300)));
@@ -233,7 +244,7 @@ pub(crate) async fn submit_with_version(
     store: &Mutex<AppStore>,
     input: ReportInput,
 ) -> Result<ReportResult, String> {
-    let (settings, recent_failures, dir) = {
+    let (settings, recent_failures, dir, site_logins) = {
         let s = store.lock().map_err(|e| e.to_string())?;
         let failures = s
             .data
@@ -255,6 +266,7 @@ pub(crate) async fn submit_with_version(
             s.data.settings.clone(),
             failures,
             reports_dir(&s),
+            crate::ytdlp::list_site_logins(),
         )
     };
 
@@ -274,6 +286,7 @@ pub(crate) async fn submit_with_version(
         &settings.cookies_from_browser,
         &ytdlp,
         &recent_failures,
+        &site_logins,
         created_at,
     );
 
@@ -354,6 +367,7 @@ mod tests {
             "auto",
             "2025.11.01",
             &["旧任务 | https://example.com/a | 网络错误".into()],
+            &[],
             1763,
         );
         assert!(body.contains("VID-1234"));

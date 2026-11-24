@@ -188,8 +188,9 @@ const SNIFFER_SCRIPT: &str = r##"
     '.vg-url{color:#7d8496;font-size:11px;word-break:break-all;margin:3px 0 6px}',
     '.vg-add{background:#22c55e;color:#06240f;padding:4px 10px}',
     '.vg-empty{color:#7d8496;padding:24px 12px;text-align:center}',
-    '.vg-capsule{position:fixed;top:12px;right:12px;background:#3b82f6;color:#fff;border:0;border-radius:999px;',
-    'padding:7px 12px;font:13px/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;cursor:pointer;',
+    '.vg-capsule{position:fixed;right:16px;bottom:18px;background:#3b82f6;color:#fff;border:0;border-radius:999px;',
+    'padding:7px 12px;font:13px/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;cursor:grab;',
+    'user-select:none;touch-action:none;',
     'box-shadow:0 2px 10px rgba(0,0,0,.4)}'
   ].join('');
 
@@ -334,7 +335,72 @@ const SNIFFER_SCRIPT: &str = r##"
       });
     });
     toggle.addEventListener('click', () => setCollapsed(!collapsed));
-    capsule.addEventListener('click', () => setCollapsed(false));
+
+    // 胶囊可拖动，避免挡住网站自带的头像 / 登录按钮；位置记在本站 localStorage
+    const POS_KEY = '__vidgo_capsule_pos__';
+    let dragging = false;
+    let moved = false;
+    let suppressClick = false;
+    let startX = 0;
+    let startY = 0;
+    let startRight = 16;
+    let startBottom = 18;
+    try {
+      const saved = JSON.parse(localStorage.getItem(POS_KEY) || 'null');
+      if (saved && typeof saved.right === 'number' && typeof saved.bottom === 'number') {
+        capsule.style.right = saved.right + 'px';
+        capsule.style.bottom = saved.bottom + 'px';
+      }
+    } catch (_) {}
+    capsule.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0) return;
+      dragging = true;
+      moved = false;
+      const rect = capsule.getBoundingClientRect();
+      startX = event.clientX;
+      startY = event.clientY;
+      startRight = window.innerWidth - rect.right;
+      startBottom = window.innerHeight - rect.bottom;
+      if (capsule.setPointerCapture) capsule.setPointerCapture(event.pointerId);
+      capsule.style.cursor = 'grabbing';
+    });
+    capsule.addEventListener('pointermove', (event) => {
+      if (!dragging) return;
+      const dx = event.clientX - startX;
+      const dy = event.clientY - startY;
+      if (!moved && Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
+      moved = true;
+      const right = Math.min(Math.max(8, startRight - dx), window.innerWidth - 90);
+      const bottom = Math.min(Math.max(8, startBottom - dy), window.innerHeight - 44);
+      capsule.style.right = right + 'px';
+      capsule.style.bottom = bottom + 'px';
+    });
+    const endDrag = (event) => {
+      if (!dragging) return;
+      dragging = false;
+      capsule.style.cursor = 'grab';
+      if (capsule.releasePointerCapture) {
+        try { capsule.releasePointerCapture(event.pointerId); } catch (_) {}
+      }
+      if (moved) {
+        suppressClick = true;
+        try {
+          localStorage.setItem(POS_KEY, JSON.stringify({
+            right: parseFloat(capsule.style.right) || 16,
+            bottom: parseFloat(capsule.style.bottom) || 18
+          }));
+        } catch (_) {}
+      }
+    };
+    capsule.addEventListener('pointerup', endDrag);
+    capsule.addEventListener('pointercancel', endDrag);
+    capsule.addEventListener('click', () => {
+      if (suppressClick) {
+        suppressClick = false;
+        return;
+      }
+      setCollapsed(false);
+    });
 
     setCollapsed(collapsed);
     render();
@@ -416,20 +482,50 @@ pub struct SnifferPayload {
     pub timestamp: u64,
 }
 
+/// 当前内置浏览器实例使用的代理，用于在代理设置或目标站点变化时重建窗口
+static BROWSER_PROXY: Mutex<Option<String>> = Mutex::new(None);
+
+fn desired_browser_proxy(app: &AppHandle, target: &Url) -> String {
+    let Some(state) = app.try_state::<Mutex<crate::store::AppStore>>() else {
+        return String::new();
+    };
+    let Ok(store) = state.lock() else {
+        return String::new();
+    };
+    crate::ytdlp::effective_proxy(&store.data.settings, target.as_str())
+}
+
 pub fn open_or_focus(app: &AppHandle, url: Option<&str>) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window(BROWSER_LABEL) {
-        if let Some(url) = url {
-            window
-                .navigate(parse_http_url(url)?)
-                .map_err(|error| error.to_string())?;
+    let target = parse_http_url(url.unwrap_or(DEFAULT_URL))?;
+    let proxy = desired_browser_proxy(app, &target);
+    let applied = BROWSER_PROXY
+        .lock()
+        .map(|value| value.clone().unwrap_or_default())
+        .unwrap_or_default();
+
+    if app.get_webview_window(BROWSER_LABEL).is_some() && applied != proxy {
+        // WebView 的代理只能在创建时指定：代理设置变化时重建窗口（Cookie 保存在数据目录中）
+        if let Some(window) = app.get_webview_window(BROWSER_LABEL) {
+            let _ = window.close();
         }
+        for _ in 0..20 {
+            if app.get_webview_window(BROWSER_LABEL).is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    if let Some(window) = app.get_webview_window(BROWSER_LABEL) {
+        window
+            .navigate(target)
+            .map_err(|error| error.to_string())?;
         window.show().map_err(|error| error.to_string())?;
         window.unminimize().map_err(|error| error.to_string())?;
         window.set_focus().map_err(|error| error.to_string())?;
         return Ok(());
     }
 
-    let target = parse_http_url(url.unwrap_or(DEFAULT_URL))?;
     let data_directory = app
         .path()
         .app_data_dir()
@@ -437,22 +533,26 @@ pub fn open_or_focus(app: &AppHandle, url: Option<&str>) -> Result<(), String> {
         .join(BROWSER_LABEL);
     std::fs::create_dir_all(&data_directory).map_err(|error| error.to_string())?;
 
-    WebviewWindowBuilder::new(app, BROWSER_LABEL, WebviewUrl::External(target))
+    let mut builder = WebviewWindowBuilder::new(app, BROWSER_LABEL, WebviewUrl::External(target.clone()))
         .title("Vidgo 内置浏览器")
         .inner_size(1200.0, 800.0)
         .center()
         .data_directory(data_directory)
-        .initialization_script_for_all_frames(SNIFFER_SCRIPT)
-        .build()
-        .map_err(|error| error.to_string())?;
+        .initialization_script_for_all_frames(SNIFFER_SCRIPT);
+    if !proxy.is_empty() {
+        let proxy_url = Url::parse(&proxy).map_err(|error| format!("代理地址无效：{error}"))?;
+        builder = builder.proxy_url(proxy_url);
+    }
+    builder.build().map_err(|error| error.to_string())?;
+    if let Ok(mut current) = BROWSER_PROXY.lock() {
+        *current = Some(proxy);
+    }
     Ok(())
 }
 
 pub fn navigate(app: &AppHandle, url: &str) -> Result<(), String> {
-    let target = parse_http_url(url)?;
-    browser_window(app)?
-        .navigate(target)
-        .map_err(|error| error.to_string())
+    // 走统一的代理判定：从国内站点跳到境外站点时需要重建窗口
+    open_or_focus(app, Some(url))
 }
 
 pub fn reload(app: &AppHandle) -> Result<(), String> {

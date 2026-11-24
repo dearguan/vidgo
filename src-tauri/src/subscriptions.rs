@@ -41,11 +41,8 @@ pub struct SubscriptionCheckResult {
 }
 
 pub fn validate_http_url(url: &str) -> Result<String, String> {
-    let parsed = reqwest::Url::parse(url.trim()).map_err(|e| format!("订阅地址无效：{e}"))?;
-    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
-        return Err("订阅地址必须是有效的 HTTP/HTTPS 链接。".into());
-    }
-    Ok(parsed.to_string())
+    crate::ytdlp::sanitize_url(url)
+        .ok_or_else(|| "订阅地址无效：请粘贴完整的 http/https 链接。".to_string())
 }
 
 pub fn add(
@@ -54,6 +51,10 @@ pub fn add(
     now_ms: i64,
 ) -> Result<Subscription, String> {
     let url = validate_http_url(url)?;
+    let url = crate::ytdlp::canonicalize_url(&url);
+    if crate::ytdlp::is_douyin_user_page(&url) {
+        return Err("抖音个人主页暂不支持订阅（解析引擎不支持）。请改用具体视频或合集链接。".into());
+    }
     if subscriptions.iter().any(|item| item.url == url) {
         return Err("该订阅已存在。".into());
     }
@@ -152,39 +153,67 @@ pub fn parse_flat_playlist(
 
 pub fn fetch_flat_playlist(
     url: &str,
-    proxy: &str,
     settings: &crate::store::Settings,
 ) -> Result<Subscription, String> {
     let url = validate_http_url(url)?;
-    let cookies = crate::ytdlp::cookie_args(settings, &url);
-    let mut command = Command::new(crate::ytdlp::ytdlp_path());
-    crate::ytdlp::hide_console(&mut command);
-    command.args([
-        "-J",
-        "--flat-playlist",
-        "--playlist-end",
-        "100",
-        "--no-warnings",
-    ]);
-    if !proxy.trim().is_empty() {
-        command.arg("--proxy").arg(proxy.trim());
+    if crate::ytdlp::is_douyin_user_page(&url) {
+        return Err("抖音个人主页暂不支持订阅（解析引擎不支持）。请改用具体视频或合集链接。".into());
     }
-    command.args(&cookies.args);
-    let output = command
-        .arg(&url)
-        .output()
-        .map_err(|e| format!("启动 yt-dlp 检查订阅失败：{e}"))?;
-    if !output.status.success() {
+    let url = crate::ytdlp::canonicalize_url(&url);
+    let proxy = crate::ytdlp::effective_proxy(settings, &url);
+
+    let mut attempt = 0usize;
+    loop {
+        let cookies = if attempt == 0 {
+            crate::ytdlp::cookie_args(settings, &url)
+        } else {
+            crate::ytdlp::cookie_args_merged(settings, &url)
+        };
+        let mut command = Command::new(crate::ytdlp::ytdlp_path());
+        crate::ytdlp::hide_console(&mut command);
+        command.args([
+            "-J",
+            "--flat-playlist",
+            "--playlist-end",
+            "100",
+            "--no-warnings",
+        ]);
+        if !proxy.is_empty() {
+            command.arg("--proxy").arg(&proxy);
+        }
+        command.args(&cookies.args);
+        let output = command
+            .arg(&url)
+            .output()
+            .map_err(|e| format!("启动 yt-dlp 检查订阅失败：{e}"))?;
+        if output.status.success() {
+            let stdout = String::from_utf8(output.stdout)
+                .map_err(|e| format!("yt-dlp 订阅输出不是有效 UTF-8：{e}"))?;
+            return parse_flat_playlist(&stdout, &url, now_ms());
+        }
+
         let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let can_merge = attempt == 0
+            && crate::ytdlp::has_site_cookie_file(&url)
+            && crate::ytdlp::has_browser_cookie_source(settings)
+            && [
+                "Fresh cookies",
+                "Sign in to confirm",
+                "login required",
+                "HTTP Error 403",
+            ]
+            .iter()
+            .any(|key| detail.to_lowercase().contains(&key.to_lowercase()));
+        if can_merge {
+            attempt = 1;
+            continue;
+        }
         return Err(if detail.is_empty() {
             format!("yt-dlp 检查订阅失败，退出状态：{}", output.status)
         } else {
             format!("yt-dlp 检查订阅失败：{detail}")
         });
     }
-    let stdout = String::from_utf8(output.stdout)
-        .map_err(|e| format!("yt-dlp 订阅输出不是有效 UTF-8：{e}"))?;
-    parse_flat_playlist(&stdout, &url, now_ms())
 }
 
 fn parse_entry(value: &Value, now_ms: i64) -> Option<SubscriptionEntry> {
