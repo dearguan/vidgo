@@ -430,7 +430,7 @@ pub async fn parse_media(state: State<'_, Mutex<AppStore>>, url: String) -> Resu
             .ok()
             .and_then(|u| {
                 u.path_segments()
-                    .and_then(|seg| seg.last().map(|s| s.to_string()))
+                    .and_then(|mut seg| seg.next_back().map(|s| s.to_string()))
             })
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "直接媒体链接".to_string());
