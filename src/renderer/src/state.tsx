@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactElement, type ReactNode } from 'react'
-import type { AppInfo, DownloadTask, Settings, SniffedMedia, UpdateInfo, UpdateProgress } from '../../shared/types'
+import type { AppInfo, DownloadTask, Settings, SiteLogin, SniffedMedia, UpdateInfo, UpdateProgress } from '../../shared/types'
 import type { View } from './utils'
 import { api } from './api'
 
@@ -26,6 +26,10 @@ interface AppContextValue {
   clearParseRequest: () => void
   openBuiltinBrowser: (url?: string) => Promise<void>
   checkBuiltinCookies: (url: string) => Promise<number>
+  /** 内置浏览器已保存的站点登录（按域名） */
+  siteLogins: SiteLogin[]
+  refreshSiteLogins: () => Promise<void>
+  removeSiteLogin: (domain: string) => Promise<void>
   /** 打开内置浏览器登录，完成后自动重试解析或重新下载 */
   loginFor: (url: string, taskId?: string) => Promise<void>
   taskAction: (action: TaskAction, id: string, deleteFile?: boolean) => void
@@ -69,6 +73,7 @@ export function AppProvider({ children }: { children: ReactNode }): ReactElement
   const [settings, setSettings] = useState<Settings | null>(null)
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null)
   const [sniffedMedia, setSniffedMedia] = useState<SniffedMedia[]>([])
+  const [siteLogins, setSiteLogins] = useState<SiteLogin[]>([])
   const [parseRequest, setParseRequest] = useState<{ url: string; token: number } | null>(null)
   const [toasts, setToasts] = useState<Toast[]>([])
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)
@@ -166,6 +171,31 @@ export function AppProvider({ children }: { children: ReactNode }): ReactElement
     return api.checkBuiltinCookies(url)
   }, [])
 
+  const refreshSiteLogins = useCallback(async () => {
+    try {
+      setSiteLogins((await api.listSiteLogins?.()) ?? [])
+    } catch {
+      // 读取失败时保留上一次结果，不影响其他功能
+    }
+  }, [])
+
+  const removeSiteLogin = useCallback(
+    async (domain: string) => {
+      try {
+        await api.deleteSiteLogin?.(domain)
+        await refreshSiteLogins()
+        notify(`已删除 ${domain} 的登录信息`)
+      } catch (e) {
+        notify(e instanceof Error ? e.message : String(e), 'err')
+      }
+    },
+    [notify, refreshSiteLogins]
+  )
+
+  useEffect(() => {
+    void refreshSiteLogins()
+  }, [refreshSiteLogins])
+
   const loginFor = useCallback(async (url: string, taskId?: string) => {
     pendingLogin.current = { url, taskId }
     try {
@@ -183,6 +213,7 @@ export function AppProvider({ children }: { children: ReactNode }): ReactElement
       notify(`已加入下载列表：${media.title || media.url}`)
     })
     const offLogin = api.onBrowserLoginDone?.(() => {
+      void refreshSiteLogins()
       const pending = pendingLogin.current
       pendingLogin.current = {}
       if (pending.taskId) {
@@ -191,13 +222,15 @@ export function AppProvider({ children }: { children: ReactNode }): ReactElement
       } else if (pending.url) {
         notify('已保存登录状态，正在重新解析…')
         requestParse(pending.url)
+      } else {
+        notify('已保存该站点的登录状态')
       }
     })
     return () => {
       offEnqueue?.()
       offLogin?.()
     }
-  }, [requestParse, notify])
+  }, [requestParse, notify, refreshSiteLogins])
 
   const taskAction = useCallback((action: TaskAction, id: string, deleteFile = false) => {
     const map: Record<TaskAction, (id: string) => Promise<unknown>> = {
@@ -276,6 +309,9 @@ export function AppProvider({ children }: { children: ReactNode }): ReactElement
         clearParseRequest,
         openBuiltinBrowser,
         checkBuiltinCookies,
+        siteLogins,
+        refreshSiteLogins,
+        removeSiteLogin,
         loginFor,
         taskAction,
         updateInfo,

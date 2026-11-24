@@ -256,10 +256,110 @@ fn parse_hongguo_html(html: &str, source_url: &str) -> Result<HongguoMedia, Stri
     })
 }
 
-/// 内置浏览器导出的 Cookie 文件路径（与配置文件同目录）
-pub fn builtin_cookies_path() -> PathBuf {
+/// 站点 Cookie 目录：每个域名一个 Netscape 格式文件（由内置浏览器导出）
+pub fn cookies_dir() -> PathBuf {
     let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-    base.join("Vidgo").join("builtin-cookies.txt")
+    base.join("Vidgo").join("cookies")
+}
+
+/// 站点登录信息（设置页展示用）
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteLogin {
+    pub domain: String,
+    pub cookie_count: u32,
+    pub saved_at: i64,
+    pub size: u64,
+}
+
+const MULTI_LEVEL_SUFFIXES: [&str; 10] = [
+    "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn", "com.hk", "com.tw", "co.jp", "co.uk",
+    "com.au",
+];
+
+/// 取「可注册域名」作为 Cookie 文件名：v.douyin.com -> douyin.com，
+/// www.bbc.co.uk -> bbc.co.uk。IP 地址原样返回。
+pub fn registrable_domain(host: &str) -> String {
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() || host.parse::<std::net::IpAddr>().is_ok() {
+        return host;
+    }
+    let labels: Vec<&str> = host.split('.').filter(|label| !label.is_empty()).collect();
+    if labels.len() <= 2 {
+        return labels.join(".");
+    }
+    let last_two = format!(
+        "{}.{}",
+        labels[labels.len() - 2],
+        labels[labels.len() - 1]
+    );
+    let take = if MULTI_LEVEL_SUFFIXES.contains(&last_two.as_str()) && labels.len() >= 3 {
+        3
+    } else {
+        2
+    };
+    labels[labels.len() - take..].join(".")
+}
+
+/// 分享短链的域名与主站不同，复用主站的登录 Cookie
+fn alias_domain(host: &str) -> Option<&'static str> {
+    match host {
+        "youtu.be" => Some("youtube.com"),
+        "b23.tv" => Some("bilibili.com"),
+        "xhslink.com" => Some("xiaohongshu.com"),
+        "v.kuaishou.com" => Some("kuaishou.com"),
+        _ => None,
+    }
+}
+
+fn cookie_file_for_host(host: &str) -> Option<PathBuf> {
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() {
+        return None;
+    }
+    let dir = cookies_dir();
+    if !dir.is_dir() {
+        return None;
+    }
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        let path = dir.join(format!("{host}.txt"));
+        return path.is_file().then_some(path);
+    }
+    let parts: Vec<&str> = host.split('.').collect();
+    // 从最具体到最宽泛：v.douyin.com -> douyin.com
+    for start in 0..parts.len().saturating_sub(1) {
+        let candidate = parts[start..].join(".");
+        let path = dir.join(format!("{candidate}.txt"));
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    if let Some(alias) = alias_domain(&host) {
+        let path = dir.join(format!("{alias}.txt"));
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn cookie_file_for_url(url: &str) -> Option<PathBuf> {
+    let parsed = reqwest::Url::parse(url.trim()).ok()?;
+    cookie_file_for_host(parsed.host_str()?)
+}
+
+/// 直接媒体文件不需要 Cookie，跳过可避免系统浏览器 Cookie 数据库读取失败（如 Chrome 加密）。
+pub fn is_direct_media_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url.trim()) else {
+        return false;
+    };
+    let path = parsed.path().to_ascii_lowercase();
+    const MEDIA_EXTS: [&str; 9] = [
+        "mp4", "webm", "m4a", "mp3", "mov", "mkv", "flv", "aac", "ogg",
+    ];
+    MEDIA_EXTS
+        .iter()
+        .any(|ext| path.ends_with(&format!(".{ext}")))
 }
 
 /// 传给 yt-dlp 的 Cookie 参数。临时副本用于避免多任务并发时 yt-dlp 回写同一文件；
@@ -277,21 +377,27 @@ impl Drop for CookieArgs {
     }
 }
 
-fn builtin_cookies_fresh(path: &std::path::Path) -> bool {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.elapsed().ok())
-        .is_some_and(|age| age < std::time::Duration::from_secs(7 * 24 * 3600))
+/// 仅接受 yt-dlp 认识的真实浏览器名；auto / none / 空值不传参，避免 yt-dlp 直接报错。
+fn browser_cookie_source(value: &str) -> Option<&'static str> {
+    const BROWSERS: [&str; 9] = [
+        "chrome", "chromium", "edge", "firefox", "safari", "brave", "vivaldi", "opera", "whale",
+    ];
+    let lower = value.trim().to_ascii_lowercase();
+    BROWSERS.iter().find(|name| **name == lower).copied()
 }
 
-/// 优先使用内置浏览器导出的 Cookie，其次回退系统浏览器。
-pub fn cookie_args(settings: &crate::store::Settings) -> CookieArgs {
-    let path = builtin_cookies_path();
-    if builtin_cookies_fresh(&path) {
+/// 优先使用该站点已保存的登录 Cookie，其次回退系统浏览器。
+pub fn cookie_args(settings: &crate::store::Settings, target_url: &str) -> CookieArgs {
+    if is_direct_media_url(target_url) {
+        return CookieArgs {
+            args: Vec::new(),
+            temp: None,
+        };
+    }
+    if let Some(path) = cookie_file_for_url(target_url) {
         if let Ok(bytes) = std::fs::read(&path) {
-            let temp = std::env::temp_dir()
-                .join(format!("vidgo-cookies-{}.txt", uuid::Uuid::new_v4()));
+            let temp =
+                std::env::temp_dir().join(format!("vidgo-cookies-{}.txt", uuid::Uuid::new_v4()));
             if std::fs::write(&temp, bytes).is_ok() {
                 return CookieArgs {
                     args: vec!["--cookies".into(), temp.to_string_lossy().to_string()],
@@ -300,12 +406,9 @@ pub fn cookie_args(settings: &crate::store::Settings) -> CookieArgs {
             }
         }
     }
-    if !settings.cookies_from_browser.is_empty() {
+    if let Some(browser) = browser_cookie_source(&settings.cookies_from_browser) {
         return CookieArgs {
-            args: vec![
-                "--cookies-from-browser".into(),
-                settings.cookies_from_browser.clone(),
-            ],
+            args: vec!["--cookies-from-browser".into(), browser.to_string()],
             temp: None,
         };
     }
@@ -313,6 +416,87 @@ pub fn cookie_args(settings: &crate::store::Settings) -> CookieArgs {
         args: Vec::new(),
         temp: None,
     }
+}
+
+fn normalized_domain(raw: &str) -> Result<String, String> {
+    let domain = raw.trim().trim_start_matches('.').to_ascii_lowercase();
+    let valid = !domain.is_empty()
+        && domain.len() <= 253
+        && domain
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+        && !domain.contains("..");
+    if valid {
+        Ok(domain)
+    } else {
+        Err("域名格式不正确。".into())
+    }
+}
+
+/// 保存某个站点的 Cookie（覆盖旧文件）
+pub fn save_site_cookies(domain: &str, text: &str) -> Result<PathBuf, String> {
+    let domain = normalized_domain(domain)?;
+    let dir = cookies_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建 Cookie 目录失败：{e}"))?;
+    let path = dir.join(format!("{domain}.txt"));
+    std::fs::write(&path, text).map_err(|e| format!("保存 Cookie 失败：{e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(path)
+}
+
+/// 统计 Netscape Cookie 行数（`#HttpOnly_` 前缀是真实 Cookie，不算注释）
+fn count_cookie_lines(text: &str) -> usize {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && (!line.starts_with('#') || line.starts_with("#HttpOnly_")))
+        .count()
+}
+
+pub fn list_site_logins() -> Vec<SiteLogin> {
+    let dir = cookies_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut logins: Vec<SiteLogin> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("txt") {
+                return None;
+            }
+            let domain = path.file_stem()?.to_str()?.to_ascii_lowercase();
+            let text = std::fs::read_to_string(&path).ok()?;
+            let meta = entry.metadata().ok();
+            let saved_at = meta
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            Some(SiteLogin {
+                domain,
+                cookie_count: u32::try_from(count_cookie_lines(&text)).unwrap_or(u32::MAX),
+                saved_at,
+                size: meta.map(|m| m.len()).unwrap_or(0),
+            })
+        })
+        .filter(|login| login.cookie_count > 0)
+        .collect();
+    logins.sort_by_key(|a| std::cmp::Reverse(a.saved_at));
+    logins
+}
+
+pub fn delete_site_login(domain: &str) -> Result<(), String> {
+    let domain = normalized_domain(domain)?;
+    let path = cookies_dir().join(format!("{domain}.txt"));
+    if !path.is_file() {
+        return Err("该站点的登录信息不存在。".into());
+    }
+    std::fs::remove_file(&path).map_err(|e| format!("删除登录信息失败：{e}"))
 }
 
 pub fn build_download_args(
@@ -396,5 +580,48 @@ mod tests {
             "https://www.novelquickapp.com/hongguo/ug/pages/video-animation-share"
         ));
         assert!(!is_hongguo_url("https://example.com/novelquickapp.com"));
+    }
+
+    #[test]
+    fn derives_registrable_domain_for_cookie_files() {
+        assert_eq!(registrable_domain("v.douyin.com"), "douyin.com");
+        assert_eq!(registrable_domain("WWW.Bilibili.com"), "bilibili.com");
+        assert_eq!(registrable_domain("bilibili.com"), "bilibili.com");
+        assert_eq!(registrable_domain("www.bbc.co.uk"), "bbc.co.uk");
+        assert_eq!(registrable_domain("a.b.example.com.cn"), "example.com.cn");
+        assert_eq!(registrable_domain("127.0.0.1"), "127.0.0.1");
+    }
+
+    #[test]
+    fn direct_media_urls_skip_cookies() {
+        assert!(is_direct_media_url(
+            "https://lf-douyin-pc-web.douyinstatic.com/obj/douyin-pc-web/uuu_265.mp4"
+        ));
+        assert!(!is_direct_media_url("https://v.douyin.com/zXGnY0-vJD4/"));
+        assert!(!is_direct_media_url("https://www.bilibili.com/video/BV1xx"));
+    }
+
+    #[test]
+    fn ignores_placeholder_browser_cookie_sources() {
+        assert_eq!(browser_cookie_source("edge"), Some("edge"));
+        assert_eq!(browser_cookie_source(" Chrome "), Some("chrome"));
+        assert_eq!(browser_cookie_source("auto"), None);
+        assert_eq!(browser_cookie_source("none"), None);
+        assert_eq!(browser_cookie_source(""), None);
+    }
+
+    #[test]
+    fn share_links_reuse_main_site_cookies() {
+        assert_eq!(alias_domain("youtu.be"), Some("youtube.com"));
+        assert_eq!(alias_domain("b23.tv"), Some("bilibili.com"));
+        assert_eq!(alias_domain("example.com"), None);
+    }
+
+    #[test]
+    fn counts_netscape_cookies_including_httponly() {
+        let text = "# Netscape HTTP Cookie File\n# Generated by Vidgo\n\
+                    .douyin.com\tTRUE\t/\tTRUE\t0\tsessionid\tabc\n\
+                    #HttpOnly_.douyin.com\tTRUE\t/\tTRUE\t0\ttoken\txyz\n";
+        assert_eq!(count_cookie_lines(text), 2);
     }
 }

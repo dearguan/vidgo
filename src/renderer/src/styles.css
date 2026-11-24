@@ -1751,6 +1751,76 @@ p {
   gap: 12px;
 }
 
+/* ---------- 站点登录 ---------- */
+.site-login-add {
+  width: 100%;
+  justify-content: flex-end;
+}
+
+.site-login-add .input {
+  max-width: 280px;
+}
+
+.site-login-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0 8px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.site-login-item {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 0;
+}
+
+.site-login-item + .site-login-item {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.site-login-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.site-login-domain {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.site-login-host {
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.site-login-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.site-login-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.site-login-empty {
+  margin: 0;
+  padding: 4px 0 16px;
+  font-size: 12px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
 .update-card {
   display: flex;
   align-items: center;

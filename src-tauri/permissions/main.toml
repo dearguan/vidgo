@@ -32,6 +32,8 @@ commands.allow = [
   "reload_builtin_browser",
   "close_builtin_browser",
   "check_builtin_cookies",
+  "list_site_logins",
+  "delete_site_login",
   "submit_report",
   "check_update",
   "install_update",

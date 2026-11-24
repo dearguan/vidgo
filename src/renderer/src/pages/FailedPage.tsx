@@ -1,5 +1,5 @@
 import { useState, type ReactElement } from 'react'
-import type { DownloadTask } from '../../../shared/types'
+import type { DownloadTask, ReportInput } from '../../../shared/types'
 import { Icon } from '../Icon'
 import { useApp } from '../state'
 import { ERROR_KIND_LABEL, classifyError, formatTime, type ErrorKind } from '../utils'
@@ -97,6 +97,7 @@ export function FailedPage(): ReactElement {
   const [kind, setKind] = useState<ErrorKind | 'all'>('all')
   const [detail, setDetail] = useState<DownloadTask | null>(null)
   const [reportTask, setReportTask] = useState<DownloadTask | null>(null)
+  const [batchInput, setBatchInput] = useState<ReportInput | null>(null)
 
   const failed = tasks.filter((t) => t.status === 'FAILED' || t.status === 'CANCELLED')
   const list = kind === 'all' ? failed : failed.filter((t) => classifyError(t.error) === kind)
@@ -111,6 +112,20 @@ export function FailedPage(): ReactElement {
     const text = list.map((t) => `【${t.title}】\n${t.error ?? ''}\n${t.errorDetail ?? ''}`).join('\n\n------\n\n')
     await navigator.clipboard.writeText(text)
     notify('已复制全部日志')
+  }
+
+  const reportAll = (): void => {
+    const detail = list
+      .slice(0, 20)
+      .map((t, index) => `${index + 1}. ${t.title}\n链接：${t.url}\n错误：${t.error ?? ''}\n${t.errorDetail ?? ''}`)
+      .join('\n\n')
+    const more = list.length > 20 ? `\n\n（仅包含前 20 条，共 ${list.length} 条）` : ''
+    setBatchInput({
+      kind: 'download',
+      title: `[批量] ${list.length} 个下载任务失败`,
+      message: `${list.length} 个任务下载失败，请协助批量排查。`,
+      detail: `${detail}${more}`
+    })
   }
 
   return (
@@ -133,6 +148,9 @@ export function FailedPage(): ReactElement {
             </button>
             <button className="btn secondary small" onClick={() => void copyAll()}>
               全部复制日志
+            </button>
+            <button className="btn secondary small" onClick={reportAll}>
+              批量上报
             </button>
           </div>
         )}
@@ -162,6 +180,8 @@ export function FailedPage(): ReactElement {
           }}
         />
       )}
+
+      {batchInput && <ReportDialog input={batchInput} onClose={() => setBatchInput(null)} />}
 
       {reportTask && (
         <ReportDialog

@@ -173,6 +173,14 @@ export interface AppInfo {
   ytdlp: string
 }
 
+/** 内置浏览器保存的站点登录（按域名） */
+export interface SiteLogin {
+  domain: string
+  cookieCount: number
+  savedAt: number
+  size: number
+}
+
 export interface Api {
   parse(url: string): Promise<ParseResult>
   cancelParse(): Promise<void>
@@ -203,6 +211,8 @@ export interface Api {
   checkSubscription?(id: string): Promise<SubscriptionCheckResult>
   deleteSubscription?(id: string): Promise<void>
   checkBuiltinCookies(url: string): Promise<number>
+  listSiteLogins?(): Promise<SiteLogin[]>
+  deleteSiteLogin?(domain: string): Promise<void>
   readClipboard(): Promise<string>
   submitReport?(input: ReportInput): Promise<ReportResult>
   checkUpdate?(): Promise<UpdateInfo>

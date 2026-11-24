@@ -54,6 +54,8 @@ pub fn run() -> tauri::Result<()> {
             commands::reload_builtin_browser,
             commands::close_builtin_browser,
             commands::check_builtin_cookies,
+            commands::list_site_logins,
+            commands::delete_site_login,
             commands::sniffer_report,
             commands::sniffer_list,
             commands::sniffer_enqueue,

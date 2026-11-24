@@ -14,6 +14,7 @@ import type {
   ReportInput,
   ReportResult,
   Settings,
+  SiteLogin,
   SniffedMedia,
   Subscription,
   SubscriptionCheckResult,
@@ -104,6 +105,10 @@ const electronApi = {
     (globalThis as any).window?.api?.deleteSubscription?.(id) ?? unsupported('删除订阅'),
   checkBuiltinCookies: (url: string): Promise<number> =>
     (globalThis as any).window?.api?.checkBuiltinCookies?.(url) ?? Promise.resolve(0),
+  listSiteLogins: (): Promise<SiteLogin[]> =>
+    (globalThis as any).window?.api?.listSiteLogins?.() ?? Promise.resolve([]),
+  deleteSiteLogin: (domain: string): Promise<void> =>
+    (globalThis as any).window?.api?.deleteSiteLogin?.(domain) ?? unsupported('删除站点登录'),
   submitReport: (_input: ReportInput): Promise<ReportResult> => unsupported('问题上报'),
   checkUpdate: (): Promise<UpdateInfo> => unsupported('检查更新'),
   installUpdate: (_assetUrl?: string, _sha256?: string, _size?: number): Promise<void> =>
@@ -179,6 +184,8 @@ const tauriApi = {
   checkSubscription: (id: string) => tauriApi.invoke<SubscriptionCheckResult>('check_subscription', { id }),
   deleteSubscription: (id: string) => tauriApi.invoke<void>('delete_subscription', { id }),
   checkBuiltinCookies: (url: string) => tauriApi.invoke<number>('check_builtin_cookies', { url }),
+  listSiteLogins: () => tauriApi.invoke<SiteLogin[]>('list_site_logins'),
+  deleteSiteLogin: (domain: string) => tauriApi.invoke<void>('delete_site_login', { domain }),
   submitReport: (input: ReportInput) => tauriApi.invoke<ReportResult>('submit_report', { input }),
   checkUpdate: () => tauriApi.invoke<UpdateInfo>('check_update'),
   installUpdate: (assetUrl: string, sha256?: string, size?: number) =>

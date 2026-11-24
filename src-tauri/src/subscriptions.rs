@@ -156,7 +156,7 @@ pub fn fetch_flat_playlist(
     settings: &crate::store::Settings,
 ) -> Result<Subscription, String> {
     let url = validate_http_url(url)?;
-    let cookies = crate::ytdlp::cookie_args(settings);
+    let cookies = crate::ytdlp::cookie_args(settings, &url);
     let mut command = Command::new(crate::ytdlp::ytdlp_path());
     crate::ytdlp::hide_console(&mut command);
     command.args([

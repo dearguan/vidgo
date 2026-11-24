@@ -287,8 +287,8 @@ pub async fn parse_media(state: State<'_, Mutex<AppStore>>, url: String) -> Resu
         args.push("--proxy".into());
         args.push(settings.proxy.clone());
     }
-    // 内置浏览器导出的 Cookie 优先，其次系统浏览器；临时文件在此作用域结束时删除
-    let cookies = ytdlp::cookie_args(&settings);
+    // 该站点已保存的登录 Cookie 优先，其次系统浏览器；临时文件在此作用域结束时删除
+    let cookies = ytdlp::cookie_args(&settings, &url);
     args.extend(cookies.args.iter().cloned());
     args.push(url.clone());
 
@@ -338,13 +338,16 @@ pub async fn parse_media(state: State<'_, Mutex<AppStore>>, url: String) -> Resu
 
 /// 判断失败原因是否属于「需要登录 / Cookie」，用于引导用户去内置浏览器登录
 fn needs_login_error(detail: &str) -> bool {
-    const KEYS: [&str; 6] = [
+    const KEYS: [&str; 9] = [
         "Fresh cookies",
         "Sign in to confirm",
         "login required",
         "Private video",
         "HTTP Error 403",
         "Forbidden",
+        "Could not copy Chrome cookie database",
+        "cookie database",
+        "could not decrypt",
     ];
     let lower = detail.to_lowercase();
     KEYS.iter().any(|key| lower.contains(&key.to_lowercase()))
@@ -353,11 +356,12 @@ fn needs_login_error(detail: &str) -> bool {
 fn humanize_err(detail: &str) -> String {
     let rules: Vec<(&str, &str)> = vec![
         ("Unsupported URL|no suitable info extractor", "当前网站暂时无法解析。可能是网站更新导致解析器失效。"),
-        ("Sign in to confirm|login required|Private video", "该视频需要登录才能访问，请配置 Cookie 或用内置浏览器登录。"),
+        ("Sign in to confirm|login required|Private video", "该视频需要登录才能访问，请在「设置 → 站点登录」用内置浏览器登录后重试。"),
         ("HTTP Error 403|Forbidden", "网站拒绝访问（403）。可能是地区限制或需要登录。"),
         ("HTTP Error 404|not found", "视频不存在或已被删除（404）。"),
         ("getaddrinfo|timed out|Connection refused|SSL", "网络连接失败，请检查网络或代理设置。"),
-        ("Fresh cookies", "该网站需要登录 Cookie。请在「设置 → 读取系统浏览器 Cookie」选择你登录过该站的浏览器（如 Chrome / Edge），再重新解析。"),
+        ("Could not copy Chrome cookie database|failed to decrypt|could not decrypt|cookie database", "无法读取系统浏览器的 Cookie（浏览器正在运行或新版加密保护）。请在「设置 → 站点登录」用内置浏览器登录该网站。"),
+        ("Fresh cookies", "该网站需要登录 Cookie。请在「设置 → 站点登录」用内置浏览器登录该网站后重试，也可以改为读取系统浏览器 Cookie。"),
         ("ffmpeg|ffprobe", "FFmpeg 处理失败，请检查组件是否完整。"),
         ("No space left|ENOSPC|disk quota", "磁盘空间不足，请更换保存位置。"),
         ("Permission denied|EACCES|EPERM", "没有写入权限，请更换保存位置。"),
@@ -500,7 +504,7 @@ pub async fn start_download(
                 }
             }
         }
-        let cookies = ytdlp::cookie_args(&settings);
+        let cookies = ytdlp::cookie_args(&settings, &download_url);
         let mut args = ytdlp::build_download_args(
             &download_url, &task_clone.selector, &task_clone.save_dir,
             &settings.proxy, &cookies.args,
@@ -1119,12 +1123,24 @@ pub async fn sniffer_enqueue(
     crate::browser::enqueue(&app, state.inner(), &url)
 }
 
-/// 侧栏点「完成登录」：导出内置浏览器 Cookie 并通知主窗口重试
+/// 侧栏点「完成登录」：按站点保存内置浏览器 Cookie 并通知主窗口重试
 #[tauri::command]
-pub async fn browser_login_done(app: AppHandle) -> Result<String, String> {
-    let path = crate::browser::export_cookies(&app).await?;
-    let _ = app.emit("browser:login-done", ());
-    Ok(path.to_string_lossy().to_string())
+pub async fn browser_login_done(app: AppHandle) -> Result<crate::ytdlp::SiteLogin, String> {
+    let login = crate::browser::export_cookies(&app).await?;
+    let _ = app.emit("browser:login-done", login.clone());
+    Ok(login)
+}
+
+/// 设置页：列出已保存的站点登录
+#[tauri::command]
+pub async fn list_site_logins() -> Result<Vec<crate::ytdlp::SiteLogin>, String> {
+    Ok(crate::ytdlp::list_site_logins())
+}
+
+/// 设置页：删除某个站点的登录信息
+#[tauri::command]
+pub async fn delete_site_login(domain: String) -> Result<(), String> {
+    crate::ytdlp::delete_site_login(&domain)
 }
 
 #[tauri::command]

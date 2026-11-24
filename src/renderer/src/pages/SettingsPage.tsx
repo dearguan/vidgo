@@ -3,8 +3,25 @@ import type { Settings, ThemeMode } from '../../../shared/types'
 import { Icon } from '../Icon'
 import { useApp, describeUpdateProgress } from '../state'
 import { api } from '../api'
+import { formatTime } from '../utils'
 
 type CookieBrowser = Settings['cookieBrowser']
+
+/** 常见站点显示名（没有命中时直接显示域名） */
+const DOMAIN_LABELS: Record<string, string> = {
+  'douyin.com': '抖音',
+  'bilibili.com': '哔哩哔哩',
+  'youtube.com': 'YouTube',
+  'xiaohongshu.com': '小红书',
+  'kuaishou.com': '快手',
+  'weibo.com': '微博',
+  'qq.com': '腾讯视频',
+  'iqiyi.com': '爱奇艺',
+  'youku.com': '优酷',
+  'tiktok.com': 'TikTok',
+  'x.com': 'X',
+  'instagram.com': 'Instagram'
+}
 
 const BROWSER_OPTIONS: Array<{ value: CookieBrowser; label: string; hint?: string }> = [
   { value: 'auto', label: '自动检测（推荐）', hint: '依次尝试系统中可用的浏览器 Cookie' },
@@ -53,6 +70,8 @@ export function SettingsPage(): ReactElement {
     updateSettings,
     chooseDir,
     openBuiltinBrowser,
+    siteLogins,
+    removeSiteLogin,
     notify,
     updateInfo,
     checkingUpdate,
@@ -65,6 +84,13 @@ export function SettingsPage(): ReactElement {
   const [proxy, setProxy] = useState('')
   const [token, setToken] = useState('')
   const [repo, setRepo] = useState('')
+  const [loginUrl, setLoginUrl] = useState('')
+
+  const openLogin = (target?: string): void => {
+    const raw = target?.trim()
+    const url = raw ? (raw.startsWith('http://') || raw.startsWith('https://') ? raw : `https://${raw}`) : undefined
+    void openBuiltinBrowser(url).catch((e) => notify(e instanceof Error ? e.message : String(e), 'err'))
+  }
 
   useEffect(() => {
     setProxy(settings?.proxy ?? '')
@@ -142,23 +168,61 @@ export function SettingsPage(): ReactElement {
         </Row>
       </Group>
 
-      <Group title="登录与 Cookie" onReset={() => patch({ cookieBrowser: 'auto' })}>
+      <Group title={`站点登录${siteLogins.length > 0 ? `（${siteLogins.length}）` : ''}`} onReset={() => patch({ cookieBrowser: 'auto' })}>
         <Row
-          label="内置浏览器"
-          hint="在内置浏览器里登录后，点页面右上角「完成登录」，该站 Cookie 会保存并自动用于解析与下载（有效期 7 天）。也可以直接读取系统浏览器 Cookie。"
+          label="登录新站点"
+          hint="填入网站地址，在打开的内置浏览器里登录。登录后点页面右上角「完成登录」，Cookie 会按站点保存，之后解析和下载该站点会自动使用。"
         >
-          <button
-            className="btn primary"
-            onClick={() => {
-              void openBuiltinBrowser().catch((e) => notify(e instanceof Error ? e.message : String(e), 'err'))
-            }}
-          >
-            打开内置浏览器登录
-          </button>
+          <div className="settings-inline site-login-add">
+            <input
+              className="input"
+              value={loginUrl}
+              placeholder="https://www.bilibili.com"
+              aria-label="要登录的网站地址"
+              onChange={(e) => setLoginUrl(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && loginUrl.trim()) openLogin(loginUrl.trim())
+              }}
+            />
+            <button className="btn primary small" disabled={!loginUrl.trim()} onClick={() => openLogin(loginUrl.trim())}>
+              打开并登录
+            </button>
+          </div>
         </Row>
+
+        {siteLogins.length === 0 ? (
+          <p className="site-login-empty">
+            还没有保存任何站点登录。登录一次后，该站点的下载会一直带着 Cookie，不需要重复配置。
+          </p>
+        ) : (
+          <ul className="site-login-list">
+            {siteLogins.map((item) => (
+              <li className="site-login-item" key={item.domain}>
+                <div className="site-login-main">
+                  <span className="site-login-domain">
+                    {DOMAIN_LABELS[item.domain] ?? item.domain}
+                    {DOMAIN_LABELS[item.domain] && <span className="site-login-host">{item.domain}</span>}
+                  </span>
+                  <span className="site-login-meta">
+                    {item.cookieCount} 个 Cookie · 保存于 {formatTime(item.savedAt)}
+                  </span>
+                </div>
+                <div className="site-login-actions">
+                  <button className="btn secondary small" onClick={() => openLogin(item.domain)}>
+                    重新登录
+                  </button>
+                  <button className="btn-text muted" onClick={() => void removeSiteLogin(item.domain)}>
+                    删除
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+
         <Row
           label="读取系统浏览器 Cookie"
-          hint="如果你的 Chrome/Edge 里已经登录过视频站，Vidgo 可以直接读那个浏览器的 Cookie，零额外配置即可下载。"
+          hint="新版 Chrome / Edge 常因加密保护读取失败。建议优先用上面的内置浏览器登录；此选项仅在解析失败时兜底。"
         >
           <select
             className="input select"
